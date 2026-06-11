@@ -1,0 +1,62 @@
+"""Centralized configuration."""
+
+import os
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class SiteConfig:
+    base_url: str = "https://animedekho.app"
+    ajax_url: str = "https://animedekho.app/wp-admin/admin-ajax.php"
+    series_path: str = "/series-hindi"
+    movies_path: str = "/movies-hindi"
+    episode_path: str = "/epi"
+    embed_pattern: str = "https://animedekho.app/?trdekho={server}&trid={post_id}&trtype=2"
+    category_api: str = "https://animedekho.app/wp-json/wp/v2/categories"
+    user_agent: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    )
+    bypass_cookie: dict = field(default_factory=lambda: {"toronites_server": "vidstream"})
+    request_timeout: int = 15
+    # Known trdekho server IDs
+    server_ids: dict = field(default_factory=lambda: {
+        0: "VidStream",
+        1: "Server 2",
+        2: "Server 3",
+        3: "Server 4",
+        4: "Server 5",
+        6: "Server 6",
+        8: "Server 7",
+    })
+
+
+@dataclass(frozen=True)
+class CacheConfig:
+    default_ttl: int = 300
+    search_ttl: int = 120
+    categories_ttl: int = 3600
+    listing_ttl: int = 180
+    max_entries: int = 500
+
+
+@dataclass(frozen=True)
+class BotConfig:
+    token: str = field(default_factory=lambda: os.environ.get("BOT_TOKEN", ""))
+    items_per_page: int = 10
+    max_search_results: int = 15
+    max_genres: int = 20
+    episodes_per_row: int = 5
+    seasons_per_row: int = 4
+    slug_max_len: int = 42
+    log_level: str = field(default_factory=lambda: os.environ.get("LOG_LEVEL", "INFO"))
+
+
+@dataclass(frozen=True)
+class Settings:
+    site: SiteConfig = field(default_factory=SiteConfig)
+    cache: CacheConfig = field(default_factory=CacheConfig)
+    bot: BotConfig = field(default_factory=BotConfig)
+
+
+settings = Settings()
