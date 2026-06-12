@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import re
 import logging
+from urllib.parse import urljoin
 
+from api.models import Quality
 from utils.http import http_client
 from extractors.shortener import detect_and_bypass, is_shortener
 
@@ -25,7 +27,7 @@ async def resolve_player_url(player_url: str) -> dict | None:
     Given a CDN player embed URL (or shortener wrapping one), try to
     extract the direct stream URL.
 
-    Returns: ``{"url": "...", "type": "m3u8|mp4", "quality": "..."}`` or ``None``.
+    Returns: ``{"url": "...", "type": "m3u8|mp4", "quality": "...", "qualities": [...]}`` or ``None``.
     """
     if not player_url:
         return None
@@ -37,25 +39,118 @@ async def resolve_player_url(player_url: str) -> dict | None:
 
     try:
         if "vimeo.com" in domain:
-            return await _resolve_vimeo(resolved_url)
+            result = await _resolve_vimeo(resolved_url)
         elif any(x in domain for x in ("streamwish", "swish", "playerwish")):
-            return await _resolve_packed_player(resolved_url)
+            result = await _resolve_packed_player(resolved_url)
         elif any(x in domain for x in ("filemoon", "kerapoxy")):
-            return await _resolve_packed_player(resolved_url)
+            result = await _resolve_packed_player(resolved_url)
         elif "doodstream" in domain or "dood." in domain:
-            return await _resolve_dood(resolved_url)
+            result = await _resolve_dood(resolved_url)
         elif any(x in domain for x in ("streamtape", "strtape")):
-            return await _resolve_streamtape(resolved_url)
+            result = await _resolve_streamtape(resolved_url)
         elif "mp4upload" in domain:
-            return await _resolve_packed_player(resolved_url)
+            result = await _resolve_packed_player(resolved_url)
         elif "vidguard" in domain or "vgfplay" in domain:
-            return await _resolve_packed_player(resolved_url)
+            result = await _resolve_packed_player(resolved_url)
         else:
             # Generic: try packed first, then scan for m3u8/mp4
-            return await _resolve_packed_player(resolved_url) or await _resolve_generic(resolved_url)
+            result = await _resolve_packed_player(resolved_url) or await _resolve_generic(resolved_url)
+
+        # If we found an m3u8, try to get quality variants
+        if result and result["type"] == "m3u8":
+            qualities = await get_m3u8_qualities(result["url"])
+            result["qualities"] = qualities
+
+        return result
     except Exception as e:
         log.warning("Extractor failed for %s: %s", resolved_url, e)
         return None
+
+
+async def get_m3u8_qualities(m3u8_url: str) -> list[Quality]:
+    """
+    Fetch an m3u8 URL and parse quality variants from the master playlist.
+    If it's not a master playlist (no variants), return a single 'auto' quality.
+    """
+    try:
+        content = await http_client.get(m3u8_url, ttl=60)
+        qualities = parse_m3u8_qualities(content, m3u8_url)
+        if qualities:
+            return qualities
+        # Not a master playlist — single quality
+        return [Quality(resolution="auto", url=m3u8_url, label="Auto")]
+    except Exception as e:
+        log.warning("Failed to fetch m3u8 qualities from %s: %s", m3u8_url, e)
+        return [Quality(resolution="auto", url=m3u8_url, label="Auto")]
+
+
+def parse_m3u8_qualities(m3u8_content: str, base_url: str) -> list[Quality]:
+    """
+    Parse #EXT-X-STREAM-INF lines from a master m3u8 playlist
+    to extract available resolutions.
+    """
+    qualities: list[Quality] = []
+    lines = m3u8_content.strip().split("\n")
+
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line.startswith("#EXT-X-STREAM-INF"):
+            continue
+
+        # Parse attributes
+        bandwidth = 0
+        resolution = ""
+
+        bw_match = re.search(r"BANDWIDTH=(\d+)", line)
+        if bw_match:
+            bandwidth = int(bw_match.group(1))
+
+        res_match = re.search(r"RESOLUTION=(\d+)x(\d+)", line)
+        if res_match:
+            height = int(res_match.group(2))
+            resolution = f"{height}p"
+
+        # Next non-empty, non-comment line is the URL
+        url = ""
+        for j in range(i + 1, min(i + 3, len(lines))):
+            candidate = lines[j].strip()
+            if candidate and not candidate.startswith("#"):
+                url = candidate
+                break
+
+        if not url:
+            continue
+
+        # Resolve relative URLs
+        if not url.startswith("http"):
+            url = urljoin(base_url, url)
+
+        if not resolution:
+            # Try to infer from bandwidth
+            if bandwidth > 4_000_000:
+                resolution = "1080p"
+            elif bandwidth > 2_000_000:
+                resolution = "720p"
+            elif bandwidth > 1_000_000:
+                resolution = "480p"
+            else:
+                resolution = "360p"
+
+        label = resolution
+        if bandwidth > 0:
+            mbps = bandwidth / 1_000_000
+            label = f"{resolution} ({mbps:.1f}Mbps)"
+
+        qualities.append(Quality(
+            resolution=resolution,
+            url=url,
+            bandwidth=bandwidth,
+            label=label,
+        ))
+
+    # Sort by bandwidth (highest first)
+    qualities.sort(key=lambda q: q.bandwidth, reverse=True)
+    return qualities
 
 
 # ── Helpers ────────────────────────────────────────────────────────────

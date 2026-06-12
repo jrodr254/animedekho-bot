@@ -5,7 +5,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from api.models import (
     SearchResult, Series, Season, Episode, VideoServer,
-    Category, PaginatedResult,
+    Category, PaginatedResult, Quality,
 )
 from config.settings import settings
 from utils.helpers import short_slug
@@ -69,6 +69,12 @@ def season_picker(series: Series) -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
+    # Batch download buttons per season
+    for sn in sorted(series.seasons.keys()):
+        cb = f"bat:{short_slug(series.slug, 30)}:{sn}"
+        buttons.append([InlineKeyboardButton(
+            f"📥 Batch Download S{sn}", callback_data=cb
+        )])
     buttons.append([
         InlineKeyboardButton("🔙 Back", callback_data="rp:1"),
         _menu_btn(),
@@ -91,6 +97,11 @@ def episode_picker(
             row = []
     if row:
         buttons.append(row)
+    # Batch download for this season
+    cb = f"bat:{short_slug(series_slug, 30)}:{season}"
+    buttons.append([InlineKeyboardButton(
+        f"📥 Batch Download S{season}", callback_data=cb
+    )])
     buttons.append([
         InlineKeyboardButton("🔙 Seasons", callback_data=f"sr:{short_slug(series_slug)}"),
         _menu_btn(),
@@ -103,14 +114,29 @@ def server_picker(
     ep_slug: str,
     back_cb: str,
 ) -> InlineKeyboardMarkup:
+    """
+    Show servers with download buttons.
+    Each server shows available quality options as download buttons.
+    Falls back to URL buttons for servers without direct URLs.
+    """
     buttons = []
-    for i, srv in enumerate(servers):
-        if srv.player_url:
+
+    for si, srv in enumerate(servers):
+        if srv.qualities:
+            # Show each quality as a download button
+            for qi, q in enumerate(srv.qualities[:4]):  # max 4 qualities per server
+                cb = f"dl:{si}:{qi}:{short_slug(ep_slug, 40)}"
+                label = f"📥 {srv.name} - {q.label}"
+                buttons.append([InlineKeyboardButton(label[:40], callback_data=cb)])
+        elif srv.direct_url:
+            # Single download button for direct URL
+            cb = f"dl:{si}:0:{short_slug(ep_slug, 40)}"
+            label = f"📥 {srv.name} ({srv.video_type.upper()})"
+            buttons.append([InlineKeyboardButton(label[:40], callback_data=cb)])
+        elif srv.player_url:
+            # Fallback: URL button for player embed
             label = f"▶️ {srv.name}"
             buttons.append([InlineKeyboardButton(label, url=srv.player_url)])
-        elif srv.direct_url:
-            label = f"⬇️ {srv.name} ({srv.video_type.upper()})"
-            buttons.append([InlineKeyboardButton(label, url=srv.direct_url)])
 
     # Always provide a "Watch on Site" link
     buttons.append([InlineKeyboardButton(
@@ -119,6 +145,46 @@ def server_picker(
     )])
     buttons.append([
         InlineKeyboardButton("🔙 Back", callback_data=back_cb),
+        _menu_btn(),
+    ])
+    return InlineKeyboardMarkup(buttons)
+
+
+def movie_server_picker(
+    servers: list[VideoServer],
+    movie_slug: str,
+    back_cb: str = "mp:1",
+) -> InlineKeyboardMarkup:
+    """Movie server picker with download buttons."""
+    buttons = []
+
+    for si, srv in enumerate(servers[:5]):
+        if srv.qualities:
+            for qi, q in enumerate(srv.qualities[:4]):
+                cb = f"mdl:{si}:{qi}:{short_slug(movie_slug, 38)}"
+                label = f"📥 {srv.name} - {q.label}"
+                buttons.append([InlineKeyboardButton(label[:40], callback_data=cb)])
+        elif srv.direct_url:
+            cb = f"mdl:{si}:0:{short_slug(movie_slug, 38)}"
+            label = f"📥 {srv.name} ({srv.video_type.upper()})"
+            buttons.append([InlineKeyboardButton(label[:40], callback_data=cb)])
+        elif srv.player_url:
+            buttons.append([InlineKeyboardButton(f"▶️ {srv.name}", url=srv.player_url)])
+
+    buttons.append([InlineKeyboardButton("🌐 Watch on Site", url=f"https://animedekho.app/movie-hindi/{movie_slug}/")])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb), _menu_btn()])
+    return InlineKeyboardMarkup(buttons)
+
+
+def batch_quality_picker(series_slug: str, season: int) -> InlineKeyboardMarkup:
+    """Quality selection for batch download."""
+    buttons = []
+    ss = short_slug(series_slug, 28)
+    for q in ["360p", "480p", "720p", "1080p", "auto"]:
+        cb = f"bq:{ss}:{season}:{q}"
+        buttons.append([InlineKeyboardButton(f"📥 {q}", callback_data=cb)])
+    buttons.append([
+        InlineKeyboardButton("🔙 Cancel", callback_data=f"se:{short_slug(series_slug, 35)}:{season}"),
         _menu_btn(),
     ])
     return InlineKeyboardMarkup(buttons)
@@ -166,15 +232,8 @@ def category_page(
 
 
 def movie_detail(movie, back_cb: str = "mp:1") -> InlineKeyboardMarkup:
-    buttons = []
-    for srv in movie.servers[:5]:
-        if srv.player_url:
-            buttons.append([InlineKeyboardButton(f"▶️ {srv.name}", url=srv.player_url)])
-        elif srv.direct_url:
-            buttons.append([InlineKeyboardButton(f"⬇️ {srv.name}", url=srv.direct_url)])
-    buttons.append([InlineKeyboardButton("🌐 Watch on Site", url=movie.url)])
-    buttons.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb), _menu_btn()])
-    return InlineKeyboardMarkup(buttons)
+    """Movie detail with download buttons."""
+    return movie_server_picker(movie.servers, movie.slug, back_cb)
 
 
 # ── Helpers ───────────────────────────────────────────────────────

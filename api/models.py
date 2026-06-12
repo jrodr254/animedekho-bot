@@ -5,6 +5,18 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class Quality:
+    resolution: str          # "720p", "1080p" etc
+    url: str
+    bandwidth: int = 0
+    label: str = ""          # human-readable like "720p (HD)"
+
+    def __post_init__(self):
+        if not self.label:
+            self.label = self.resolution
+
+
+@dataclass
 class VideoServer:
     name: str
     server_id: int
@@ -12,6 +24,7 @@ class VideoServer:
     player_url: str = ""        # real CDN player
     direct_url: str = ""        # direct .m3u8 / .mp4 if extracted
     video_type: str = ""        # m3u8 / mp4
+    qualities: list[Quality] = field(default_factory=list)
 
     @property
     def is_available(self) -> bool:

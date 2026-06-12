@@ -116,6 +116,37 @@ class BotLogger:
             f"🤖 <b>/start</b> by @{_esc(username)} (<code>{user_id}</code>)"
         )
 
+    async def log_download_start(self, user_id: int, username: str, title: str, quality: str):
+        await self._send_log(
+            f"📥 <b>Download started:</b> {_esc(title)} [{_esc(quality)}]\n"
+            f"👤 @{_esc(username)} (<code>{user_id}</code>)"
+        )
+
+    async def log_download_complete(self, title: str, quality: str, file_size_mb: float):
+        await self._send_log(
+            f"✅ <b>Download complete:</b> {_esc(title)} [{_esc(quality)}]\n"
+            f"💾 {file_size_mb:.1f} MB"
+        )
+
+    async def log_download_error(self, title: str, error: str):
+        await self._send_log(
+            f"❌ <b>Download failed:</b> {_esc(title)}\n"
+            f"<code>{_esc(error[:300])}</code>"
+        )
+
+    async def log_batch_start(self, user_id: int, username: str, series: str, season: int, episode_count: int):
+        await self._send_log(
+            f"📦 <b>Batch download started:</b> {_esc(series)} S{season}\n"
+            f"📺 {episode_count} episodes\n"
+            f"👤 @{_esc(username)} (<code>{user_id}</code>)"
+        )
+
+    async def log_batch_complete(self, series: str, season: int, completed: int, total: int):
+        await self._send_log(
+            f"📦 <b>Batch complete:</b> {_esc(series)} S{season}\n"
+            f"✅ {completed}/{total} episodes uploaded"
+        )
+
 
 def _esc(text: str) -> str:
     import html

@@ -1,16 +1,24 @@
 """Callback query router — handles all inline button presses."""
 
 from __future__ import annotations
+import asyncio
 import logging
+import os
 
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
 from api.client import api
+from api.models import Quality
 from bot import keyboards as kb
 from bot.auth import require_approved
 from bot.logger import bot_logger
+from bot.downloader import (
+    download_and_upload, make_episode_filename, make_movie_filename,
+    sanitize_filename,
+)
+from extractors.resolver import resolve_player_url, get_m3u8_qualities
 from utils.helpers import esc, truncate, short_slug, extract_series_slug, slug_to_title
 
 log = logging.getLogger(__name__)
@@ -47,6 +55,41 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         elif data.startswith("ep:"):
             await _handle_episode(q, data[3:])
+
+        elif data.startswith("dl:"):
+            # dl:server_idx:quality_idx:ep_slug
+            parts = data.split(":", 3)
+            await _handle_download(
+                q, ctx,
+                server_idx=int(parts[1]),
+                quality_idx=int(parts[2]),
+                ep_slug=parts[3],
+            )
+
+        elif data.startswith("mdl:"):
+            # mdl:server_idx:quality_idx:movie_slug
+            parts = data.split(":", 3)
+            await _handle_movie_download(
+                q, ctx,
+                server_idx=int(parts[1]),
+                quality_idx=int(parts[2]),
+                movie_slug=parts[3],
+            )
+
+        elif data.startswith("bat:"):
+            # bat:series_slug:season — show quality picker
+            parts = data.split(":", 2)
+            await _handle_batch_picker(q, slug=parts[1], season=int(parts[2]))
+
+        elif data.startswith("bq:"):
+            # bq:series_slug:season:quality — execute batch download
+            parts = data.split(":", 3)
+            await _handle_batch_download(
+                q, ctx,
+                slug=parts[1],
+                season=int(parts[2]),
+                quality_pref=parts[3],
+            )
 
         elif data.startswith("ct:"):
             parts = data.split(":")
@@ -117,6 +160,9 @@ async def _handle_movie_detail(q, slug: str):
     resolved = await api.resolve_all_servers(movie.servers)
     movie.servers = resolved
 
+    # Populate qualities for servers with player URLs
+    await _populate_server_qualities(resolved)
+
     # Log resolution
     if bot_logger:
         for srv in movie.servers:
@@ -132,6 +178,9 @@ async def _handle_movie_detail(q, slug: str):
         text += f"\n▶️ <b>{len(resolved)} server(s) available</b>"
     else:
         text += "\n⚠️ No direct servers found — use 'Watch on Site'."
+
+    # Store for download callbacks
+    _store_servers(q.message.chat_id, f"movie:{slug}", resolved, movie.title)
 
     markup = kb.movie_detail(movie)
 
@@ -176,6 +225,9 @@ async def _handle_episode(q, ep_slug: str):
     # Resolve all servers
     resolved = await api.resolve_all_servers(episode.servers)
 
+    # Populate qualities for resolved servers
+    await _populate_server_qualities(resolved)
+
     # Log resolution
     if bot_logger:
         for srv in resolved:
@@ -188,7 +240,10 @@ async def _handle_episode(q, ep_slug: str):
     if resolved:
         text += f"🖥 <b>{len(resolved)} server(s) found:</b>\n"
         for srv in resolved[:7]:
-            if srv.player_url:
+            if srv.qualities:
+                quals = ", ".join(q.resolution for q in srv.qualities[:4])
+                text += f"  • {srv.name} — {quals}\n"
+            elif srv.player_url:
                 from urllib.parse import urlparse
                 domain = urlparse(srv.player_url).netloc
                 text += f"  • {srv.name} — {domain}\n"
@@ -202,6 +257,9 @@ async def _handle_episode(q, ep_slug: str):
     series_slug = extract_series_slug(ep_slug)
     back_cb = f"sr:{short_slug(series_slug)}" if series_slug else "rp:1"
 
+    # Store resolved servers in context for download callbacks
+    _store_servers(q.message.chat_id, ep_slug, resolved, episode.title)
+
     markup = kb.server_picker(resolved, ep_slug, back_cb)
 
     try:
@@ -211,6 +269,263 @@ async def _handle_episode(q, ep_slug: str):
             await q.edit_message_caption(caption=text[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
         except Exception:
             await q.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def _handle_download(q, ctx, server_idx: int, quality_idx: int, ep_slug: str):
+    """Handle single episode download."""
+    chat_id = q.message.chat_id
+    user = q.from_user
+
+    # Get stored server data or re-resolve
+    data = _get_servers(chat_id, ep_slug)
+    if not data:
+        await _safe_edit(q, "⏳ Resolving servers...")
+        episode = await api.get_episode(ep_slug)
+        resolved = await api.resolve_all_servers(episode.servers)
+        await _populate_server_qualities(resolved)
+        _store_servers(chat_id, ep_slug, resolved, episode.title)
+        data = _get_servers(chat_id, ep_slug)
+
+    if not data or server_idx >= len(data["servers"]):
+        await _safe_edit(q, "⚠️ Server not found. Please go back and try again.")
+        return
+
+    srv = data["servers"][server_idx]
+    title = data.get("title", ep_slug)
+
+    # Determine quality/URL to download
+    quality = _pick_quality(srv, quality_idx)
+    if not quality:
+        await _safe_edit(q, "⚠️ No downloadable URL found for this server.")
+        return
+
+    # Extract season/episode info for filename
+    import re
+    m = re.match(r".*-(\d+)x(\d+)", ep_slug)
+    season = int(m.group(1)) if m else 0
+    ep_num = int(m.group(2)) if m else 0
+    series_slug = extract_series_slug(ep_slug)
+    series_title = slug_to_title(series_slug) if series_slug else title
+
+    filename = make_episode_filename(series_title, season, ep_num, quality.resolution)
+
+    # Log
+    if bot_logger:
+        await bot_logger.log_download_start(
+            user.id, user.username or str(user.id), title, quality.resolution
+        )
+
+    # Send progress message and start download in background
+    progress_msg = await q.message.reply_text(
+        f"📥 <b>Starting download:</b> {esc(title)} [{quality.resolution}]",
+        parse_mode=ParseMode.HTML,
+    )
+
+    asyncio.create_task(
+        _do_download(ctx.bot, chat_id, quality, filename, title, progress_msg, user)
+    )
+
+
+async def _handle_movie_download(q, ctx, server_idx: int, quality_idx: int, movie_slug: str):
+    """Handle movie download."""
+    chat_id = q.message.chat_id
+    user = q.from_user
+
+    # Get stored server data or re-resolve
+    data = _get_servers(chat_id, f"movie:{movie_slug}")
+    if not data:
+        await _safe_edit(q, "⏳ Resolving servers...")
+        movie = await api.get_movie(movie_slug)
+        resolved = await api.resolve_all_servers(movie.servers)
+        await _populate_server_qualities(resolved)
+        _store_servers(chat_id, f"movie:{movie_slug}", resolved, movie.title)
+        data = _get_servers(chat_id, f"movie:{movie_slug}")
+
+    if not data or server_idx >= len(data["servers"]):
+        await _safe_edit(q, "⚠️ Server not found. Please go back and try again.")
+        return
+
+    srv = data["servers"][server_idx]
+    title = data.get("title", slug_to_title(movie_slug))
+
+    quality = _pick_quality(srv, quality_idx)
+    if not quality:
+        await _safe_edit(q, "⚠️ No downloadable URL found for this server.")
+        return
+
+    filename = make_movie_filename(title, quality.resolution)
+
+    if bot_logger:
+        await bot_logger.log_download_start(
+            user.id, user.username or str(user.id), title, quality.resolution
+        )
+
+    progress_msg = await q.message.reply_text(
+        f"📥 <b>Starting download:</b> {esc(title)} [{quality.resolution}]",
+        parse_mode=ParseMode.HTML,
+    )
+
+    asyncio.create_task(
+        _do_download(ctx.bot, chat_id, quality, filename, title, progress_msg, user)
+    )
+
+
+async def _handle_batch_picker(q, slug: str, season: int):
+    """Show quality picker for batch download."""
+    text = (
+        f"📦 <b>Batch Download</b>\n"
+        f"📺 {esc(slug_to_title(slug))} — Season {season}\n\n"
+        f"Select quality for all episodes:"
+    )
+    markup = kb.batch_quality_picker(slug, season)
+    await _safe_edit(q, text, markup)
+
+
+async def _handle_batch_download(q, ctx, slug: str, season: int, quality_pref: str):
+    """Execute batch download for an entire season."""
+    chat_id = q.message.chat_id
+    user = q.from_user
+
+    # Get series info
+    series = await api.get_series(slug)
+    s = series.seasons.get(season)
+    if not s or not s.episodes:
+        await _safe_edit(q, f"⚠️ No episodes found for Season {season}.")
+        return
+
+    total = len(s.episodes)
+
+    if bot_logger:
+        await bot_logger.log_batch_start(
+            user.id, user.username or str(user.id),
+            series.title, season, total
+        )
+
+    progress_msg = await q.message.reply_text(
+        f"📦 <b>Batch Download Starting</b>\n"
+        f"📺 {esc(series.title)} — Season {season}\n"
+        f"📂 {total} episodes · Quality: {quality_pref}\n\n"
+        f"⏳ Resolving episodes...",
+        parse_mode=ParseMode.HTML,
+    )
+
+    # Run batch in background
+    asyncio.create_task(
+        _do_batch_download(
+            ctx.bot, chat_id, series, season, s.episodes,
+            quality_pref, progress_msg, user
+        )
+    )
+
+
+async def _do_batch_download(bot, chat_id, series, season, episodes, quality_pref, progress_msg, user):
+    """Execute batch download sequentially."""
+    total = len(episodes)
+    completed = 0
+
+    for i, ep in enumerate(episodes, 1):
+        try:
+            await progress_msg.edit_text(
+                f"📦 <b>Batch Download</b> — {esc(series.title)} S{season}\n\n"
+                f"📥 Downloading S{season}E{ep.number}... ({i}/{total})\n"
+                f"✅ {completed} completed",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+        try:
+            # Resolve episode
+            episode = await api.get_episode(ep.slug)
+            resolved = await api.resolve_all_servers(episode.servers)
+            await _populate_server_qualities(resolved)
+
+            if not resolved:
+                log.warning("No servers for batch ep %s", ep.slug)
+                continue
+
+            # Find best matching quality
+            quality = _find_quality_match(resolved, quality_pref)
+            if not quality:
+                log.warning("No quality match for batch ep %s", ep.slug)
+                continue
+
+            filename = make_episode_filename(series.title, season, ep.number, quality.resolution)
+
+            # Create a per-episode progress message
+            ep_msg = await bot.send_message(
+                chat_id,
+                f"📥 <b>Downloading:</b> S{season}E{ep.number} [{quality.resolution}]",
+                parse_mode=ParseMode.HTML,
+            )
+
+            success = await download_and_upload(
+                chat_id, quality, filename,
+                f"{series.title} S{season}E{ep.number}",
+                ep_msg, bot,
+            )
+
+            if success:
+                completed += 1
+                if bot_logger:
+                    file_size = 0  # already cleaned up
+                    await bot_logger.log_download_complete(
+                        f"{series.title} S{season}E{ep.number}",
+                        quality.resolution, 0
+                    )
+            else:
+                if bot_logger:
+                    await bot_logger.log_download_error(
+                        f"{series.title} S{season}E{ep.number}",
+                        "Download/upload failed"
+                    )
+
+        except Exception as e:
+            log.exception("Batch download error for ep %s", ep.slug)
+            if bot_logger:
+                await bot_logger.log_download_error(
+                    f"{series.title} S{season}E{ep.number}", str(e)
+                )
+
+        # Small delay between episodes to avoid rate limits
+        await asyncio.sleep(2)
+
+    # Final summary
+    try:
+        await progress_msg.edit_text(
+            f"{'✅' if completed == total else '⚠️'} <b>Batch complete!</b>\n"
+            f"📺 {esc(series.title)} — Season {season}\n"
+            f"✅ {completed}/{total} episodes uploaded.",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
+    if bot_logger:
+        await bot_logger.log_batch_complete(series.title, season, completed, total)
+
+
+async def _do_download(bot, chat_id, quality, filename, title, progress_msg, user):
+    """Background task for single download."""
+    try:
+        success = await download_and_upload(
+            chat_id, quality, filename, title, progress_msg, bot
+        )
+        if success and bot_logger:
+            await bot_logger.log_download_complete(title, quality.resolution, 0)
+        elif not success and bot_logger:
+            await bot_logger.log_download_error(title, "Download/upload failed")
+    except Exception as e:
+        log.exception("Download task error for %s", title)
+        if bot_logger:
+            await bot_logger.log_download_error(title, str(e))
+        try:
+            await progress_msg.edit_text(
+                f"❌ <b>Error:</b> {esc(title)}\n{esc(str(e)[:200])}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
 
 
 async def _handle_genres(q):
@@ -229,6 +544,105 @@ async def _handle_category(q, cat_slug: str, page: int):
     title = slug_to_title(cat_slug)
     markup = kb.category_page(result.items, cat_slug, page, result.max_page)
     await _send_text(q, f"📂 <b>{esc(title)}</b> — Page {page}", markup)
+
+
+# ── Quality / Server helpers ─────────────────────────────────────────
+
+async def _populate_server_qualities(servers: list):
+    """For each server with a player_url, try to resolve and populate qualities."""
+    for srv in servers:
+        if srv.qualities:
+            continue  # Already populated
+        try:
+            result = await resolve_player_url(srv.player_url or srv.direct_url)
+            if result:
+                if result.get("qualities"):
+                    srv.qualities = result["qualities"]
+                elif result.get("url"):
+                    vtype = result.get("type", "mp4")
+                    srv.direct_url = result["url"]
+                    srv.video_type = vtype
+                    srv.qualities = [Quality(
+                        resolution="auto",
+                        url=result["url"],
+                        label=f"Auto ({vtype.upper()})"
+                    )]
+        except Exception as e:
+            log.debug("Quality populate failed for %s: %s", srv.name, e)
+
+
+def _pick_quality(srv, quality_idx: int):
+    """Pick a quality from a server by index, with fallback."""
+    if srv.qualities and quality_idx < len(srv.qualities):
+        return srv.qualities[quality_idx]
+    if srv.qualities:
+        return srv.qualities[0]
+    if srv.direct_url:
+        return Quality(resolution="auto", url=srv.direct_url)
+    return None
+
+
+def _find_quality_match(servers: list, quality_pref: str) -> Quality | None:
+    """Find the best quality matching preference across all servers."""
+    all_qualities = []
+    for srv in servers:
+        all_qualities.extend(srv.qualities)
+
+    if not all_qualities:
+        # Fallback to direct URLs
+        for srv in servers:
+            if srv.direct_url:
+                return Quality(resolution="auto", url=srv.direct_url)
+        return None
+
+    if quality_pref == "auto":
+        return all_qualities[0]  # Highest quality (sorted by bandwidth desc)
+
+    # Try exact match
+    for q in all_qualities:
+        if q.resolution == quality_pref:
+            return q
+
+    # Try closest match
+    pref_height = int(quality_pref.replace("p", "")) if quality_pref.endswith("p") else 0
+    best = None
+    best_diff = float("inf")
+    for q in all_qualities:
+        try:
+            h = int(q.resolution.replace("p", ""))
+            diff = abs(h - pref_height)
+            if diff < best_diff:
+                best_diff = diff
+                best = q
+        except ValueError:
+            continue
+
+    return best or all_qualities[0]
+
+
+# ── Server data cache (in-memory, per chat) ──────────────────────────
+
+_server_cache: dict[str, dict] = {}
+
+
+def _store_servers(chat_id: int, key: str, servers: list, title: str = ""):
+    """Store resolved servers for download callbacks."""
+    cache_key = f"{chat_id}:{key}"
+    _server_cache[cache_key] = {
+        "servers": servers,
+        "title": title,
+    }
+    # Keep cache bounded
+    if len(_server_cache) > 200:
+        # Remove oldest entries
+        keys = list(_server_cache.keys())
+        for k in keys[:50]:
+            _server_cache.pop(k, None)
+
+
+def _get_servers(chat_id: int, key: str) -> dict | None:
+    cache_key = f"{chat_id}:{key}"
+    return _server_cache.get(cache_key)
 
 
 # ── Utilities ─────────────────────────────────────────────────────
