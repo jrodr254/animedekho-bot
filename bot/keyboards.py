@@ -15,7 +15,6 @@ S = settings.bot
 
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 Search Anime", callback_data="m:search")],
         [
             InlineKeyboardButton("📺 Recent Series", callback_data="rp:1"),
             InlineKeyboardButton("🎬 Movies", callback_data="mp:1"),

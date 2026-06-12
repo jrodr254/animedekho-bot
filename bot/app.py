@@ -9,15 +9,27 @@ from telegram.ext import (
 
 from config.settings import settings
 from utils.http import http_client
-from .handlers import cmd_start, cmd_search, cmd_help, callback_router, handle_text
+from bot.auth import load_users
+from .handlers import (
+    cmd_start, cmd_help, callback_router, handle_text,
+    cmd_adduser, cmd_removeuser, cmd_users,
+    cmd_setlogchannel, cmd_setmainchannel,
+)
 
 log = logging.getLogger(__name__)
 
 
 async def _post_init(app):
-    """Called after app.initialize() — start HTTP client."""
+    """Called after app.initialize() — start HTTP client & logger."""
     await http_client.start()
-    log.info("HTTP client started")
+    load_users()
+    log.info("HTTP client started, users loaded")
+
+    # Init bot logger
+    from bot.logger import BotLogger
+    import bot.logger as logger_mod
+    logger_mod.bot_logger = BotLogger(app.bot)
+    log.info("Bot logger initialized")
 
 
 async def _post_shutdown(app):
@@ -30,6 +42,8 @@ def create_app():
     """Build the Telegram Application with all handlers registered."""
     if not settings.bot.token:
         raise RuntimeError("BOT_TOKEN environment variable is required")
+    if not settings.bot.owner_id:
+        raise RuntimeError("OWNER_ID environment variable is required")
 
     app = (
         ApplicationBuilder()
@@ -41,8 +55,14 @@ def create_app():
 
     # Commands
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("help", cmd_help))
+
+    # Admin commands (owner-only)
+    app.add_handler(CommandHandler("adduser", cmd_adduser))
+    app.add_handler(CommandHandler("removeuser", cmd_removeuser))
+    app.add_handler(CommandHandler("users", cmd_users))
+    app.add_handler(CommandHandler("setlogchannel", cmd_setlogchannel))
+    app.add_handler(CommandHandler("setmainchannel", cmd_setmainchannel))
 
     # Callback queries (inline buttons)
     app.add_handler(CallbackQueryHandler(callback_router))

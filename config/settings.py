@@ -43,6 +43,9 @@ class CacheConfig:
 @dataclass(frozen=True)
 class BotConfig:
     token: str = field(default_factory=lambda: os.environ.get("BOT_TOKEN", ""))
+    owner_id: int = field(default_factory=lambda: int(os.environ.get("OWNER_ID", "0")))
+    main_channel: int = field(default_factory=lambda: int(os.environ.get("MAIN_CHANNEL", "0")))
+    log_channel: int = field(default_factory=lambda: int(os.environ.get("LOG_CHANNEL", "0")))
     items_per_page: int = 10
     max_search_results: int = 15
     max_genres: int = 20

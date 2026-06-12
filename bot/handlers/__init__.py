@@ -1,5 +1,9 @@
-from .commands import cmd_start, cmd_search, cmd_help
+from .commands import cmd_start, cmd_help
 from .callbacks import callback_router
 from .messages import handle_text
+from .admin import (
+    cmd_adduser, cmd_removeuser, cmd_users,
+    cmd_setlogchannel, cmd_setmainchannel,
+)
 
 __all__ = ["cmd_start", "cmd_search", "cmd_help", "callback_router", "handle_text"]

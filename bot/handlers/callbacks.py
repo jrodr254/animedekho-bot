@@ -9,11 +9,14 @@ from telegram.constants import ParseMode
 
 from api.client import api
 from bot import keyboards as kb
+from bot.auth import require_approved
+from bot.logger import bot_logger
 from utils.helpers import esc, truncate, short_slug, extract_series_slug, slug_to_title
 
 log = logging.getLogger(__name__)
 
 
+@require_approved
 async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -22,10 +25,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         if data == "m:main":
             await _send_text(q, "🎌 <b>AnimeDekho Bot</b>\n\nChoose an option:", kb.main_menu())
-
-        elif data == "m:search":
-            await _send_text(q, "🔍 Type the anime name and send it as a message:")
-            ctx.user_data["awaiting_search"] = True
 
         elif data == "m:genres":
             await _handle_genres(q)
@@ -55,6 +54,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         log.exception("Callback error for %s", data)
+        if bot_logger:
+            await bot_logger.log_error(f"callback:{data}", str(e))
         await _safe_edit(q, f"⚠️ Error: {esc(str(e)[:200])}\n\nTry /start")
 
 
@@ -116,6 +117,11 @@ async def _handle_movie_detail(q, slug: str):
     resolved = await api.resolve_all_servers(movie.servers)
     movie.servers = resolved
 
+    # Log resolution
+    if bot_logger:
+        for srv in movie.servers:
+            await bot_logger.log_server_resolve(movie.title, srv.name, srv.is_available)
+
     text = f"🎬 <b>{esc(movie.title)}</b>\n\n"
     if movie.genres:
         text += f"🏷 {', '.join(movie.genres[:6])}\n"
@@ -170,13 +176,19 @@ async def _handle_episode(q, ep_slug: str):
     # Resolve all servers
     resolved = await api.resolve_all_servers(episode.servers)
 
+    # Log resolution
+    if bot_logger:
+        for srv in resolved:
+            await bot_logger.log_server_resolve(
+                episode.title or ep_slug, srv.name, srv.is_available
+            )
+
     text = f"▶️ <b>{esc(episode.title)}</b>\n\n"
 
     if resolved:
         text += f"🖥 <b>{len(resolved)} server(s) found:</b>\n"
         for srv in resolved[:7]:
             if srv.player_url:
-                # Identify domain for user
                 from urllib.parse import urlparse
                 domain = urlparse(srv.player_url).netloc
                 text += f"  • {srv.name} — {domain}\n"
@@ -184,8 +196,9 @@ async def _handle_episode(q, ep_slug: str):
                 text += f"  • {srv.name} — Direct {srv.video_type.upper()}\n"
     else:
         text += "⚠️ Could not extract servers. Use 'Watch on Site'.\n"
+        if bot_logger:
+            await bot_logger.log_error("episode_resolve", f"No servers for {ep_slug}")
 
-    # Build back button
     series_slug = extract_series_slug(ep_slug)
     back_cb = f"sr:{short_slug(series_slug)}" if series_slug else "rp:1"
 
@@ -221,7 +234,6 @@ async def _handle_category(q, cat_slug: str, page: int):
 # ── Utilities ─────────────────────────────────────────────────────
 
 async def _send_text(q, text: str, markup=None):
-    """Try edit_message_text, fall back to edit_caption or new message."""
     try:
         await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
     except Exception:
