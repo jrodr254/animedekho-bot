@@ -122,20 +122,64 @@ class AnimeDekhoAPI:
     # ── Video server resolution ───────────────────────────────────
 
     async def resolve_server(self, server: VideoServer) -> VideoServer:
-        """Fetch proxy URL and extract real player URL."""
+        """
+        Fetch proxy URL, bypass shorteners if needed, and extract the
+        real player/stream URL.
+
+        Flow:
+          1. GET the proxy_url (AnimeDekho's ``?trdekho=`` redirect page).
+          2. Look for an ``<iframe src="...">`` pointing to the player.
+          3. If the iframe src (or the page itself) goes through a link
+             shortener, bypass it to get the real player embed.
+          4. Check for direct m3u8/mp4 links in the page source.
+        """
+        from extractors.shortener import detect_and_bypass, is_shortener
+
         if not server.proxy_url:
             return server
         try:
-            html = await http_client.get(server.proxy_url, ttl=120)
-            m = re.search(r'<iframe[^>]*src="([^"]+)"', html)
-            if m:
-                server.player_url = m.group(1)
+            # Step 1: Fetch the proxy page (may be a redirect itself)
+            final_url, html = await http_client.get_with_redirects(
+                server.proxy_url,
+                headers={"Referer": cfg.base_url + "/"},
+            )
+
+            # Step 2: If the whole page landed on a shortener, bypass it
+            if is_shortener(final_url):
+                bypassed = await detect_and_bypass(final_url)
+                if bypassed and bypassed != final_url:
+                    final_url, html = await http_client.get_with_redirects(bypassed)
+
+            # Step 3: Look for <iframe src="..."> in the page
+            iframe_match = re.search(r'<iframe[^>]*src\s*=\s*["\']([^"\']+)["\']', html, re.IGNORECASE)
+            if iframe_match:
+                iframe_src = iframe_match.group(1)
+                # The iframe URL itself might be a shortener
+                iframe_src = await detect_and_bypass(iframe_src)
+                server.player_url = iframe_src
             else:
-                # Some servers return a direct redirect or script-based URL
-                m2 = re.search(r'(?:src|url|file)\s*[=:]\s*["\']?(https?://[^\s"\'<>]+\.(?:m3u8|mp4)[^\s"\'<>]*)', html)
+                # Step 4: Check for shortener links in the page body
+                # (some pages don't use iframes but have direct links)
+                link_match = re.search(
+                    r'href\s*=\s*["\']?(https?://[^\s"\'<>]+)["\']?',
+                    html,
+                )
+                if link_match and is_shortener(link_match.group(1)):
+                    bypassed = await detect_and_bypass(link_match.group(1))
+                    if bypassed:
+                        server.player_url = bypassed
+
+            # Step 5: Also scan for direct video URLs in case the page
+            # already contains the stream without needing a player
+            if not server.player_url:
+                m2 = re.search(
+                    r'(?:src|url|file)\s*[=:]\s*["\']?(https?://[^\s"\'<>]+\.(?:m3u8|mp4)[^\s"\'<>]*)',
+                    html,
+                )
                 if m2:
                     server.direct_url = m2.group(1)
                     server.video_type = "m3u8" if ".m3u8" in m2.group(1) else "mp4"
+
         except Exception as e:
             log.warning("Failed to resolve server %s: %s", server.name, e)
         return server

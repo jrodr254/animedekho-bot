@@ -86,5 +86,108 @@ class HttpClient:
         await self._cache.set(k, data, ttl)
         return data
 
+    # ── Uncached helpers (for shortener bypass & redirects) ───────
+
+    async def get_text_no_cache(
+        self, url: str, *, headers: dict | None = None
+    ) -> str:
+        """GET a URL without caching. Accepts extra headers."""
+        await self.start()
+        merged = dict(self._session.headers)
+        if headers:
+            merged.update(headers)
+        async with self._session.get(url, headers=merged) as r:
+            r.raise_for_status()
+            return await r.text()
+
+    async def post_no_cache(
+        self, url: str, *, data: dict, headers: dict | None = None
+    ) -> str:
+        """POST form data without caching. Accepts extra headers."""
+        await self.start()
+        merged = dict(self._session.headers)
+        if headers:
+            merged.update(headers)
+        async with self._session.post(url, data=data, headers=merged) as r:
+            r.raise_for_status()
+            return await r.text()
+
+    async def get_with_redirects(
+        self, url: str, *, headers: dict | None = None, max_redirects: int = 10
+    ) -> tuple[str, str]:
+        """
+        Follow redirects manually and return ``(final_url, body_text)``.
+
+        Useful when you need to know the final landing URL after a chain
+        of 301/302/meta-refresh redirects.
+        """
+        await self.start()
+        merged = dict(self._session.headers)
+        if headers:
+            merged.update(headers)
+
+        current_url = url
+        for _ in range(max_redirects):
+            async with self._session.get(
+                current_url,
+                headers=merged,
+                allow_redirects=False,
+            ) as r:
+                if r.status in (301, 302, 303, 307, 308):
+                    location = r.headers.get("Location", "")
+                    if not location:
+                        break
+                    # Handle relative redirects
+                    if not location.startswith("http"):
+                        from urllib.parse import urljoin
+                        location = urljoin(current_url, location)
+                    current_url = location
+                    continue
+
+                # Not a redirect — read the body
+                text = await r.text()
+                return (str(r.url), text)
+
+        # Fell through max redirects — do a normal fetch of current URL
+        async with self._session.get(current_url, headers=merged) as r:
+            text = await r.text()
+            return (str(r.url), text)
+
+    async def post_follow_redirects(
+        self, url: str, *, data: dict, headers: dict | None = None,
+        max_redirects: int = 10,
+    ) -> tuple[str, str]:
+        """
+        POST form data, follow redirects manually, return ``(body_text, final_url)``.
+        """
+        await self.start()
+        merged = dict(self._session.headers)
+        if headers:
+            merged.update(headers)
+
+        # First request is POST
+        async with self._session.post(
+            url, data=data, headers=merged, allow_redirects=False,
+        ) as r:
+            if r.status in (301, 302, 303, 307, 308):
+                location = r.headers.get("Location", "")
+                if location:
+                    if not location.startswith("http"):
+                        from urllib.parse import urljoin
+                        location = urljoin(url, location)
+                    # Follow remaining redirects with GET
+                    final_url, text = await self.get_with_redirects(
+                        location, headers=headers
+                    )
+                    return (text, final_url)
+            text = await r.text()
+            return (text, str(r.url))
+
+    async def head_follow(self, url: str) -> str:
+        """Follow redirects via HEAD and return the final URL (no body)."""
+        await self.start()
+        async with self._session.head(url, allow_redirects=True) as r:
+            return str(r.url)
+
 
 http_client = HttpClient()
