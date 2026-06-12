@@ -1,47 +1,15 @@
-"""User authorization — owner-managed approved user list."""
+"""User authorization — owner-managed approved user list (MongoDB-backed)."""
 
 from __future__ import annotations
-import json
 import logging
-import os
-from pathlib import Path
 from functools import wraps
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from config.settings import settings
 
 log = logging.getLogger(__name__)
-
-_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-_USERS_FILE = _DATA_DIR / "users.json"
-
-_approved_users: set[int] = set()
-
-
-# ── Persistence ────────────────────────────────────────────────────────
-
-def load_users() -> None:
-    global _approved_users
-    try:
-        if _USERS_FILE.exists():
-            data = json.loads(_USERS_FILE.read_text())
-            _approved_users = set(data.get("approved_users", []))
-            log.info("Loaded %d approved users", len(_approved_users))
-    except Exception as e:
-        log.warning("Failed to load users: %s", e)
-        _approved_users = set()
-
-
-def save_users() -> None:
-    try:
-        _DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _USERS_FILE.write_text(json.dumps(
-            {"approved_users": sorted(_approved_users)}, indent=2
-        ))
-    except Exception as e:
-        log.warning("Failed to save users: %s", e)
 
 
 # ── Checks ─────────────────────────────────────────────────────────────
@@ -50,40 +18,49 @@ def is_owner(user_id: int) -> bool:
     return user_id == settings.bot.owner_id
 
 
-def is_approved(user_id: int) -> bool:
-    return is_owner(user_id) or user_id in _approved_users
-
-
-def add_user(user_id: int) -> bool:
-    """Add user. Returns True if newly added, False if already present."""
-    if user_id in _approved_users:
+async def is_approved(user_id: int) -> bool:
+    """Check if user is approved (async — uses MongoDB)."""
+    if is_owner(user_id):
+        return True
+    from bot.database import db
+    if db is None:
+        log.warning("Database not initialized, denying user %d", user_id)
         return False
-    _approved_users.add(user_id)
-    save_users()
-    return True
+    return await db.is_approved(user_id)
 
 
-def remove_user(user_id: int) -> bool:
-    """Remove user. Returns True if removed, False if not found."""
-    if user_id not in _approved_users:
+async def add_user(user_id: int, username: str = "", added_by: int = 0) -> bool:
+    """Add user. Returns True if newly added."""
+    from bot.database import db
+    if db is None:
         return False
-    _approved_users.discard(user_id)
-    save_users()
-    return True
+    return await db.add_user(user_id, username, added_by)
 
 
-def get_users() -> list[int]:
-    return sorted(_approved_users)
+async def remove_user(user_id: int) -> bool:
+    """Remove user. Returns True if removed."""
+    from bot.database import db
+    if db is None:
+        return False
+    return await db.remove_user(user_id)
+
+
+async def get_users() -> list[int]:
+    """Get all approved user IDs."""
+    from bot.database import db
+    if db is None:
+        return []
+    return await db.get_users()
 
 
 # ── Decorator ──────────────────────────────────────────────────────────
 
 def require_approved(func):
-    """Decorator: blocks unapproved users."""
+    """Decorator: blocks unapproved users. Checks force sub too."""
     @wraps(func)
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id if update.effective_user else 0
-        if not is_approved(user_id):
+        if not await is_approved(user_id):
             target = update.callback_query or update.message
             if target:
                 text = "🔒 You don't have access. Ask the owner to add you."
@@ -92,6 +69,40 @@ def require_approved(func):
                 else:
                     await target.reply_text(text)
             return
+
+        # Force sub check (owner bypasses)
+        if not is_owner(user_id):
+            from bot.forcesub import check_subscription
+            from bot.database import db
+
+            channel_id = settings.bot.main_channel
+            if channel_id and not await check_subscription(ctx.bot, user_id, channel_id):
+                # Get channel invite link
+                invite_link = None
+                if db:
+                    invite_link = await db.get_config("channel_invite_link")
+
+                target = update.callback_query or update.message
+                if target:
+                    text = "📢 You must join our channel to use this bot!"
+                    if invite_link:
+                        markup = InlineKeyboardMarkup([[
+                            InlineKeyboardButton("Join Channel", url=invite_link),
+                        ]])
+                    else:
+                        markup = None
+                        text += "\n\nPlease contact the owner for the channel link."
+
+                    if hasattr(target, "answer"):
+                        await target.answer(text, show_alert=True)
+                        if update.callback_query and update.callback_query.message:
+                            await update.callback_query.message.reply_text(
+                                text, reply_markup=markup,
+                            )
+                    else:
+                        await target.reply_text(text, reply_markup=markup)
+                return
+
         return await func(update, ctx)
     return wrapper
 

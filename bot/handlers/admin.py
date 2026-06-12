@@ -17,7 +17,7 @@ async def cmd_adduser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_owner(uid):
         await update.message.reply_text("👑 That's the owner — already has access.")
         return
-    if add_user(uid):
+    if await add_user(uid, added_by=update.effective_user.id):
         await update.message.reply_text(f"✅ User <code>{uid}</code> added.", parse_mode=ParseMode.HTML)
         if bot_logger:
             await bot_logger.log_user_added(uid)
@@ -34,7 +34,7 @@ async def cmd_removeuser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_owner(uid):
         await update.message.reply_text("👑 Can't remove the owner.")
         return
-    if remove_user(uid):
+    if await remove_user(uid):
         await update.message.reply_text(f"✅ User <code>{uid}</code> removed.", parse_mode=ParseMode.HTML)
         if bot_logger:
             await bot_logger.log_user_removed(uid)
@@ -44,7 +44,7 @@ async def cmd_removeuser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 @require_owner
 async def cmd_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    users = get_users()
+    users = await get_users()
     if not users:
         await update.message.reply_text("📋 No approved users (only owner has access).")
         return
@@ -81,3 +81,28 @@ async def cmd_setmainchannel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await bot_logger._send_main("🔗 Main channel connected!")
     else:
         await update.message.reply_text("⚠️ Logger not initialized yet.")
+
+
+@require_owner
+async def cmd_setchannellink(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Set the channel invite link for force subscribe button."""
+    if not ctx.args:
+        await update.message.reply_text(
+            "Usage: /setchannellink <invite_link>\n\n"
+            "Example: /setchannellink https://t.me/yourchannel"
+        )
+        return
+    link = ctx.args[0].strip()
+    if not link.startswith("https://"):
+        await update.message.reply_text("⚠️ Please provide a valid HTTPS link.")
+        return
+
+    from bot.database import db
+    if db:
+        await db.set_config("channel_invite_link", link)
+        await update.message.reply_text(
+            f"✅ Channel invite link set:\n<code>{link}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await update.message.reply_text("⚠️ Database not initialized yet.")

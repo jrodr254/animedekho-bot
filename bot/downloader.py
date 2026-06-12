@@ -193,10 +193,10 @@ async def download_and_upload(
     title: str,
     progress_msg: Message,
     bot,
-) -> bool:
+) -> tuple[bool, Message | None]:
     """
     Download a video (m3u8 or mp4) and upload it to Telegram.
-    Returns True on success.
+    Returns (success, sent_message).
     """
     output_path = str(_TEMP_DIR / filename)
     video_url = quality.url
@@ -214,7 +214,7 @@ async def download_and_upload(
                 f"❌ <b>Download failed:</b> {title}",
                 parse_mode=ParseMode.HTML,
             )
-            return False
+            return False, None
 
         # Check file size
         file_size = os.path.getsize(output_path)
@@ -225,7 +225,7 @@ async def download_and_upload(
                 f"❌ <b>Download failed:</b> {title}\nFile is empty.",
                 parse_mode=ParseMode.HTML,
             )
-            return False
+            return False, None
 
         if file_size > TG_UPLOAD_LIMIT:
             await progress_msg.edit_text(
@@ -234,7 +234,7 @@ async def download_and_upload(
                 f"Try a lower quality.",
                 parse_mode=ParseMode.HTML,
             )
-            return False
+            return False, None
 
         # Upload
         await progress_msg.edit_text(
@@ -243,7 +243,7 @@ async def download_and_upload(
         )
 
         with open(output_path, "rb") as f:
-            await bot.send_document(
+            sent_msg = await bot.send_document(
                 chat_id=chat_id,
                 document=f,
                 filename=filename,
@@ -254,7 +254,7 @@ async def download_and_upload(
             f"✅ <b>Done:</b> {title}\n💾 {file_size_mb:.1f} MB",
             parse_mode=ParseMode.HTML,
         )
-        return True
+        return True, sent_msg
 
     except Exception as e:
         log.exception("Download/upload error for %s", title)
@@ -265,7 +265,7 @@ async def download_and_upload(
             )
         except Exception:
             pass
-        return False
+        return False, None
     finally:
         # Clean up temp file
         try:

@@ -308,6 +308,25 @@ async def _handle_download(q, ctx, server_idx: int, quality_idx: int, ep_slug: s
     series_title = slug_to_title(series_slug) if series_slug else title
 
     filename = make_episode_filename(series_title, season, ep_num, quality.resolution)
+    episode_key = f"S{season}E{ep_num:02d}" if season and ep_num else ""
+
+    # ── Duplicate check: send cached file if already downloaded ──
+    from bot.database import db
+    if db and series_slug and episode_key:
+        cached_fid = await db.get_cached_file(series_slug, quality.resolution, episode_key)
+        if cached_fid:
+            try:
+                await q.message.reply_video(
+                    video=cached_fid,
+                    caption=f"📦 <b>{esc(title)}</b> [{quality.resolution}]\n<i>From library — no download needed!</i>",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            except Exception as e:
+                log.warning("Cached file send failed, will re-download: %s", e)
+
+    # Get poster from stored data
+    poster_url = None
 
     # Log
     if bot_logger:
@@ -322,7 +341,12 @@ async def _handle_download(q, ctx, server_idx: int, quality_idx: int, ep_slug: s
     )
 
     asyncio.create_task(
-        _do_download(ctx.bot, chat_id, quality, filename, title, progress_msg, user)
+        _do_download(
+            ctx.bot, chat_id, quality, filename, title, progress_msg, user,
+            series_slug=series_slug or "",
+            episode_key=episode_key,
+            poster_url=poster_url,
+        )
     )
 
 
@@ -355,6 +379,21 @@ async def _handle_movie_download(q, ctx, server_idx: int, quality_idx: int, movi
 
     filename = make_movie_filename(title, quality.resolution)
 
+    # ── Duplicate check for movies ──
+    from bot.database import db
+    if db:
+        cached_fid = await db.get_cached_file(movie_slug, quality.resolution, "movie")
+        if cached_fid:
+            try:
+                await q.message.reply_video(
+                    video=cached_fid,
+                    caption=f"📦 <b>{esc(title)}</b> [{quality.resolution}]\n<i>From library — no download needed!</i>",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            except Exception as e:
+                log.warning("Cached movie file send failed, will re-download: %s", e)
+
     if bot_logger:
         await bot_logger.log_download_start(
             user.id, user.username or str(user.id), title, quality.resolution
@@ -366,7 +405,12 @@ async def _handle_movie_download(q, ctx, server_idx: int, quality_idx: int, movi
     )
 
     asyncio.create_task(
-        _do_download(ctx.bot, chat_id, quality, filename, title, progress_msg, user)
+        _do_download(
+            ctx.bot, chat_id, quality, filename, title, progress_msg, user,
+            series_slug=movie_slug,
+            episode_key="movie",
+            is_movie=True,
+        )
     )
 
 
@@ -435,6 +479,24 @@ async def _do_batch_download(bot, chat_id, series, season, episodes, quality_pre
             pass
 
         try:
+            # ── Check cache first ──
+            ep_key = f"S{season}E{ep.number:02d}"
+            from bot.database import db
+            if db:
+                cached_fid = await db.get_cached_file(series.slug, quality_pref, ep_key)
+                if cached_fid:
+                    try:
+                        await bot.send_video(
+                            chat_id,
+                            video=cached_fid,
+                            caption=f"📦 <b>{esc(series.title)} {ep_key}</b> [{quality_pref}]\n<i>From library</i>",
+                            parse_mode=ParseMode.HTML,
+                        )
+                        completed += 1
+                        continue
+                    except Exception:
+                        pass  # Cache miss or file expired, download normally
+
             # Resolve episode
             episode = await api.get_episode(ep.slug)
             resolved = await api.resolve_all_servers(episode.servers)
@@ -459,7 +521,7 @@ async def _do_batch_download(bot, chat_id, series, season, episodes, quality_pre
                 parse_mode=ParseMode.HTML,
             )
 
-            success = await download_and_upload(
+            success, sent_msg = await download_and_upload(
                 chat_id, quality, filename,
                 f"{series.title} S{season}E{ep.number}",
                 ep_msg, bot,
@@ -468,11 +530,59 @@ async def _do_batch_download(bot, chat_id, series, season, episodes, quality_pre
             if success:
                 completed += 1
                 if bot_logger:
-                    file_size = 0  # already cleaned up
                     await bot_logger.log_download_complete(
                         f"{series.title} S{season}E{ep.number}",
                         quality.resolution, 0
                     )
+
+                # Save to library
+                if sent_msg:
+                    file_id = None
+                    file_unique_id = None
+                    if sent_msg.video:
+                        file_id = sent_msg.video.file_id
+                        file_unique_id = sent_msg.video.file_unique_id
+                    elif sent_msg.document:
+                        file_id = sent_msg.document.file_id
+                        file_unique_id = sent_msg.document.file_unique_id
+
+                    if file_id and file_unique_id:
+                        from bot.library import library_manager
+                        if library_manager:
+                            try:
+                                ep_key = f"S{season}E{ep.number:02d}"
+                                await library_manager.save_to_library(
+                                    series_slug=series.slug,
+                                    series_title=series.title,
+                                    quality=quality.resolution,
+                                    episode_key=ep_key,
+                                    file_id=file_id,
+                                    file_unique_id=file_unique_id,
+                                    poster_url=series.poster,
+                                )
+                            except Exception as le:
+                                log.warning("Library save failed in batch: %s", le)
+
+                        from bot.database import db
+                        if db:
+                            try:
+                                await db.save_file(
+                                    series_slug=series.slug,
+                                    series_title=series.title,
+                                    quality=quality.resolution,
+                                    episode_key=f"S{season}E{ep.number:02d}",
+                                    file_id=file_id,
+                                    file_unique_id=file_unique_id,
+                                )
+                                await db.log_download(
+                                    user_id=user.id,
+                                    series_slug=series.slug,
+                                    episode=f"S{season}E{ep.number:02d}",
+                                    quality=quality.resolution,
+                                    file_id=file_id,
+                                )
+                            except Exception:
+                                pass
             else:
                 if bot_logger:
                     await bot_logger.log_download_error(
@@ -505,14 +615,66 @@ async def _do_batch_download(bot, chat_id, series, season, episodes, quality_pre
         await bot_logger.log_batch_complete(series.title, season, completed, total)
 
 
-async def _do_download(bot, chat_id, quality, filename, title, progress_msg, user):
+async def _do_download(bot, chat_id, quality, filename, title, progress_msg, user,
+                       series_slug="", episode_key="", poster_url=None, is_movie=False):
     """Background task for single download."""
     try:
-        success = await download_and_upload(
+        success, sent_msg = await download_and_upload(
             chat_id, quality, filename, title, progress_msg, bot
         )
         if success and bot_logger:
             await bot_logger.log_download_complete(title, quality.resolution, 0)
+
+        # Save to library if upload succeeded
+        if success and sent_msg and series_slug:
+            file_id = None
+            file_unique_id = None
+            if sent_msg.video:
+                file_id = sent_msg.video.file_id
+                file_unique_id = sent_msg.video.file_unique_id
+            elif sent_msg.document:
+                file_id = sent_msg.document.file_id
+                file_unique_id = sent_msg.document.file_unique_id
+
+            if file_id and file_unique_id:
+                from bot.library import library_manager
+                if library_manager:
+                    try:
+                        await library_manager.save_to_library(
+                            series_slug=series_slug,
+                            series_title=slug_to_title(series_slug) if series_slug else title,
+                            quality=quality.resolution,
+                            episode_key=episode_key or "movie",
+                            file_id=file_id,
+                            file_unique_id=file_unique_id,
+                            poster_url=poster_url,
+                            is_movie=is_movie,
+                        )
+                    except Exception as le:
+                        log.warning("Library save failed: %s", le)
+
+                # Save file to DB (for duplicate prevention + library links)
+                from bot.database import db
+                if db:
+                    try:
+                        await db.save_file(
+                            series_slug=series_slug,
+                            series_title=slug_to_title(series_slug) if series_slug else title,
+                            quality=quality.resolution,
+                            episode_key=episode_key or "movie",
+                            file_id=file_id,
+                            file_unique_id=file_unique_id,
+                        )
+                        await db.log_download(
+                            user_id=user.id,
+                            series_slug=series_slug,
+                            episode=episode_key or "movie",
+                            quality=quality.resolution,
+                            file_id=file_id,
+                        )
+                    except Exception:
+                        pass
+
         elif not success and bot_logger:
             await bot_logger.log_download_error(title, "Download/upload failed")
     except Exception as e:
