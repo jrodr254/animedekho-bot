@@ -85,7 +85,12 @@ async def download_m3u8(
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y",
         "-i", url,
-        "-c", "copy",
+        "-map", "0:v?",           # All video streams
+        "-map", "0:a?",           # All audio streams
+        "-map", "0:s?",           # All subtitle streams
+        "-c:v", "copy",           # Copy video codec
+        "-c:a", "copy",           # Copy audio codec
+        "-c:s", "mov_text",       # Convert subtitles to mov_text for mp4
         "-bsf:a", "aac_adtstoasc",
         "-movflags", "+faststart",
         output_path,
