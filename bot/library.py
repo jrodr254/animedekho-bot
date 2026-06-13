@@ -229,7 +229,10 @@ class LibraryManager:
             log.error("Failed to update library message %d: %s", msg_id, e)
 
     def _format_caption(self, entry: dict) -> str:
-        """Format the caption for a library message."""
+        """
+        Format the caption for a library message.
+        Style matches the template with decorated dividers and info section.
+        """
         import html as htmlmod
         title = htmlmod.escape(entry.get("series_title", entry["series_slug"]))
         quality = entry.get("quality", "auto")
@@ -237,27 +240,74 @@ class LibraryManager:
         episodes = entry.get("episodes", {})
         movie_file = entry.get("movie_file")
         slug = entry["series_slug"]
-
-        header = f"📺 <b>{title}</b> [{quality}]"
-        if part > 1:
-            header += f" (Part {part})"
-        header += "\n"
-
+        genres = entry.get("genres", [])
+        
+        # Decorative divider
+        divider = "◆━━━━━━━━━━━━━━━━━◆"
+        
+        # Genre tags
+        genre_tags = ""
+        if genres:
+            genre_tags = "  ".join([f"〘{g}〙" for g in genres[:4]]) + "\n\n"
+        
+        # Movie format
         if movie_file:
             deep = f"https://t.me/{self.bot_username}?start=get_{slug}_{quality}_movie"
-            return f"🎬 <b>{title}</b> [{quality}]\n\n▶️ <a href=\"{deep}\">Download Movie</a>"
-
-        lines = [header, "\n📂 <b>Episodes:</b>\n"]
-        # Sort episode keys naturally
-        sorted_eps = sorted(
-            episodes.keys(),
-            key=lambda k: _ep_sort_key(k),
-        )
+            caption = (
+                f"<b>{title}</b>\n\n"
+                f"{genre_tags}"
+                f"◆ <i>{title}</i> ◆\n\n"
+                f"{divider}\n\n"
+                f"➡ <b>TYPE:-</b> Movie\n"
+                f"➡ <b>QUALITY:-</b> {quality}\n"
+                f"➡ <b>AUDIO:-</b> Hindi Dubbed\n\n"
+                f"{divider}\n\n"
+                f"▶️ <a href=\"{deep}\">【 DOWNLOAD 】</a>"
+            )
+            return caption
+        
+        # Series format
+        sorted_eps = sorted(episodes.keys(), key=lambda k: _ep_sort_key(k))
+        
+        # Extract season/episode counts
+        seasons_set = set()
+        for ep_key in sorted_eps:
+            import re
+            m = re.match(r"S(\d+)E", ep_key, re.IGNORECASE)
+            if m:
+                seasons_set.add(int(m.group(1)))
+        
+        season_count = len(seasons_set) if seasons_set else 1
+        ep_count = len(sorted_eps)
+        
+        # Build episode links
+        ep_links = []
         for ep_key in sorted_eps:
             deep = f"https://t.me/{self.bot_username}?start=get_{slug}_{quality}_{ep_key}"
-            lines.append(f"• <a href=\"{deep}\">{ep_key}</a>\n")
-
-        return "".join(lines)
+            ep_links.append(f"<a href=\"{deep}\">{ep_key}</a>")
+        
+        # Join episodes (comma separated, or newlines if many)
+        if len(ep_links) <= 10:
+            eps_text = " • ".join(ep_links)
+        else:
+            eps_text = "\n".join([f"➤ {link}" for link in ep_links])
+        
+        part_text = f" (Part {part})" if part > 1 else ""
+        
+        caption = (
+            f"<b>{title}</b>\n\n"
+            f"{genre_tags}"
+            f"◆ <i>{title}</i> ◆{part_text}\n\n"
+            f"{divider}\n\n"
+            f"➡ <b>SEASON:-</b> {season_count}\n"
+            f"➡ <b>EPISODE:-</b> {ep_count}\n"
+            f"➡ <b>QUALITY:-</b> {quality}\n"
+            f"➡ <b>AUDIO:-</b> Hindi Dubbed\n\n"
+            f"{divider}\n\n"
+            f"📂 <b>Episodes:</b>\n{eps_text}"
+        )
+        
+        return caption
 
     async def get_file(self, series_slug: str, quality: str, episode_key: str) -> str | None:
         """Get file_id for a specific episode."""
