@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: animedekho-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - bot-data:/app/data
+      - bot-tmp:/tmp/animedekho_dl
+    depends_on:
+      - mongo
+
+  mongo:
+    image: mongo:7
+    container_name: animedekho-mongo
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    ports:
+      - "27017:27017"
+
+volumes:
+  bot-data:
+  bot-tmp:
+  mongo-data:

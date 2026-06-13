@@ -83,6 +83,41 @@ Built with **Pyrogram (MTProto)** for **2GB upload/download support**.
 4. **MONGO_URI**: Use Railway's MongoDB or [MongoDB Atlas](https://mongodb.com/atlas) free tier
 5. **MAIN_CHANNEL**: Create a channel, add bot as admin, get ID via [@userinfobot](https://t.me/userinfobot)
 
+## EC2 / VPS Docker Deployment (Recommended)
+
+SSH into your server and run:
+
+```bash
+# Clone the repo
+git clone https://github.com/jrodr254/animedekho-bot.git
+cd animedekho-bot
+
+# Run the setup script (does everything)
+bash setup.sh
+```
+
+The setup script will:
+1. **Install Docker** — removes old broken packages, adds official Docker repo, installs Docker Engine + Compose
+2. **Ask for env variables** — API_ID, API_HASH, BOT_TOKEN, OWNER_ID, MAIN_CHANNEL, LOG_CHANNEL → saves to `.env`
+3. **Build Docker image** — Python 3.11 + ffmpeg + N_m3u8DL-RE + yt-dlp + bot dependencies
+4. **Start containers** — bot + MongoDB in detached mode
+
+### Managing the bot
+
+```bash
+docker compose logs -f          # Live logs
+docker compose restart bot      # Restart bot
+docker compose down             # Stop everything
+docker compose up -d --build    # Rebuild & restart
+```
+
+### What's included in the Docker image
+- Python 3.11
+- ffmpeg (for m3u8 stream conversion)
+- N_m3u8DL-RE (advanced m3u8 downloader)
+- yt-dlp (streaming server download tool)
+- MongoDB 7 (separate container, data persisted in volume)
+
 ## Local Development
 
 ```bash

@@ -15,9 +15,8 @@ from bot.auth import require_approved
 from bot.logger import bot_logger
 from bot.downloader import (
     download_and_upload, make_episode_filename, make_movie_filename,
-    sanitize_filename,
+    sanitize_filename, ytdlp_probe_servers, ytdlp_get_qualities,
 )
-from extractors.resolver import resolve_player_url, get_m3u8_qualities
 from utils.helpers import esc, truncate, short_slug, extract_series_slug, slug_to_title
 
 log = logging.getLogger(__name__)
@@ -537,7 +536,7 @@ async def _do_batch_download(client: Client, chat_id, series, season, episodes, 
             )
 
             success, sent_msg = await download_and_upload(
-                chat_id, quality, filename,
+                chat_id, quality.url, quality.resolution, filename,
                 f"{series.title} S{season}E{ep.number}",
                 ep_msg, client,
             )
@@ -632,10 +631,11 @@ async def _do_batch_download(client: Client, chat_id, series, season, episodes, 
 
 async def _do_download(client: Client, chat_id, quality, filename, title, progress_msg, user,
                        series_slug="", episode_key="", poster_url=None, is_movie=False):
-    """Background task for single download."""
+    """Background task for single download using yt-dlp."""
     try:
+        # quality.url is the player_url (set by ytdlp_get_qualities)
         success, sent_msg = await download_and_upload(
-            chat_id, quality, filename, title, progress_msg, client
+            chat_id, quality.url, quality.resolution, filename, title, progress_msg, client
         )
         if success and bot_logger:
             await bot_logger.log_download_complete(title, quality.resolution, 0)
@@ -733,26 +733,21 @@ def _sort_qualities(qualities: set[str]) -> list[str]:
 
 
 async def _populate_server_qualities(servers: list):
-    """For each server with a player_url, try to resolve and populate qualities."""
+    """Probe servers with yt-dlp to find available qualities. Stops at first working server."""
     for srv in servers:
         if srv.qualities:
-            continue  # Already populated
+            continue
+        url = srv.player_url or srv.direct_url
+        if not url:
+            continue
         try:
-            result = await resolve_player_url(srv.player_url or srv.direct_url)
-            if result:
-                if result.get("qualities"):
-                    srv.qualities = result["qualities"]
-                elif result.get("url"):
-                    vtype = result.get("type", "mp4")
-                    srv.direct_url = result["url"]
-                    srv.video_type = vtype
-                    srv.qualities = [Quality(
-                        resolution="auto",
-                        url=result["url"],
-                        label=f"Auto ({vtype.upper()})"
-                    )]
+            qualities = await ytdlp_get_qualities(url)
+            if qualities:
+                srv.qualities = qualities
+                log.info("yt-dlp found %d qualities on %s", len(qualities), srv.name)
+                return  # Found a working server, no need to probe more
         except Exception as e:
-            log.debug("Quality populate failed for %s: %s", srv.name, e)
+            log.debug("yt-dlp probe failed for %s: %s", srv.name, e)
 
 
 def _pick_quality(srv, quality_idx: int):

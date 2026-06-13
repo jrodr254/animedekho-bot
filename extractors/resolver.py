@@ -204,7 +204,7 @@ def _do_unpack(payload: str, radix: int, count: int, keywords: list[str]) -> str
         """Convert *num* to a base-*base* string (up to base 36)."""
         if num < 0:
             return "-" + _base_n(-num, base)
-        digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+        digits = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
         if num < base:
             return digits[num]
         return _base_n(num // base, base) + digits[num % base]
