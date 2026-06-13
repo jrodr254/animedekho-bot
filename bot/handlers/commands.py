@@ -3,9 +3,8 @@
 import logging
 import re
 
-from telegram import Update
-from telegram.ext import ContextTypes
-from telegram.constants import ParseMode
+from pyrogram import Client, enums
+from pyrogram.types import Message
 
 from bot.keyboards import main_menu
 from bot.auth import require_approved
@@ -15,32 +14,33 @@ log = logging.getLogger(__name__)
 
 
 @require_approved
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+async def cmd_start(client: Client, message: Message):
+    user = message.from_user
 
     # Check for deep link parameters (file requests from library)
-    if ctx.args and ctx.args[0].startswith("get_"):
-        await _handle_file_request(update, ctx.args[0])
+    args = message.text.split(maxsplit=1)
+    if len(args) > 1 and args[1].startswith("get_"):
+        await _handle_file_request(client, message, args[1])
         return
 
     if bot_logger:
         await bot_logger.log_bot_start(user.id, user.username or user.first_name)
 
-    await update.message.reply_text(
+    await message.reply_text(
         "🎌 <b>AnimeDekho Bot</b>\n\n"
         "Stream Hindi / Tamil / Telugu dubbed anime!\n\n"
         "• 📺 <b>Series</b> — browse recent series\n"
         "• 🎬 <b>Movies</b> — browse movies\n"
         "• 📂 <b>Genres</b> — filter by genre\n\n"
         "Just type any anime name to search!",
-        parse_mode=ParseMode.HTML,
+        parse_mode=enums.ParseMode.HTML,
         reply_markup=main_menu(),
     )
 
 
 @require_approved
-async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+async def cmd_help(client: Client, message: Message):
+    await message.reply_text(
         "📖 <b>Commands</b>\n\n"
         "/start — Main menu\n"
         "/help — This message\n\n"
@@ -52,11 +52,11 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/setlogchannel &lt;id&gt; — Set log channel\n"
         "/setmainchannel &lt;id&gt; — Set main channel\n"
         "/setchannellink &lt;url&gt; — Set channel invite link",
-        parse_mode=ParseMode.HTML,
+        parse_mode=enums.ParseMode.HTML,
     )
 
 
-async def _handle_file_request(update: Update, param: str):
+async def _handle_file_request(client: Client, message: Message, param: str):
     """Handle deep link file requests from main channel.
 
     Format: get_<slug>_<quality>_<episode_key>
@@ -66,19 +66,16 @@ async def _handle_file_request(update: Update, param: str):
     from bot.database import db
 
     if not library_manager:
-        await update.message.reply_text("⚠️ Library not initialized.")
+        await message.reply_text("⚠️ Library not initialized.")
         return
 
     # Parse: get_<slug>_<quality>_<ep_key>
-    # Quality is like "720p", "1080p", "auto"
-    # Episode key is like "S1E01", "movie"
-    # Slug can contain underscores/hyphens, so we parse from the end
     raw = param[4:]  # strip "get_"
 
     # Try to match episode key at the end (S\d+E\d+ or "movie")
     m = re.match(r"^(.+)_(\d+p|auto)_(S\d+E\d+|movie)$", raw, re.IGNORECASE)
     if not m:
-        await update.message.reply_text("⚠️ Invalid file link format.")
+        await message.reply_text("⚠️ Invalid file link format.")
         return
 
     series_slug = m.group(1)
@@ -88,7 +85,7 @@ async def _handle_file_request(update: Update, param: str):
     # Look up file
     file_id = await library_manager.get_file(series_slug, quality, episode_key)
     if not file_id:
-        await update.message.reply_text(
+        await message.reply_text(
             "❌ File not found in library. It may have been removed or not yet uploaded."
         )
         return
@@ -102,15 +99,15 @@ async def _handle_file_request(update: Update, param: str):
         if episode_key.lower() != "movie":
             caption += f" — {episode_key}"
 
-        await update.message.reply_video(
+        await message.reply_video(
             video=file_id,
             caption=caption,
-            parse_mode=ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML,
         )
 
         # Log download
         if db:
-            user = update.effective_user
+            user = message.from_user
             await db.log_download(
                 user_id=user.id,
                 series_slug=series_slug,
@@ -122,13 +119,13 @@ async def _handle_file_request(update: Update, param: str):
         log.error("Failed to send library file: %s", e)
         # Try as document fallback
         try:
-            await update.message.reply_document(
+            await message.reply_document(
                 document=file_id,
                 caption=caption,
-                parse_mode=ParseMode.HTML,
+                parse_mode=enums.ParseMode.HTML,
             )
         except Exception as e2:
             log.error("Document fallback also failed: %s", e2)
-            await update.message.reply_text(
+            await message.reply_text(
                 "❌ Could not send file. It may have expired from Telegram servers."
             )

@@ -4,8 +4,11 @@ from __future__ import annotations
 import logging
 from functools import wraps
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
+from pyrogram import Client
+from pyrogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardButton, InlineKeyboardMarkup,
+)
 
 from config.settings import settings
 
@@ -56,18 +59,22 @@ async def get_users() -> list[int]:
 # ── Decorator ──────────────────────────────────────────────────────────
 
 def require_approved(func):
-    """Decorator: blocks unapproved users. Checks force sub too."""
+    """Decorator: blocks unapproved users. Checks force sub too.
+    
+    Works with both Message and CallbackQuery handlers.
+    Pyrogram signature: async def handler(client: Client, update: Message|CallbackQuery)
+    """
     @wraps(func)
-    async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id if update.effective_user else 0
+    async def wrapper(client: Client, update):
+        # update is either Message or CallbackQuery
+        user = update.from_user
+        user_id = user.id if user else 0
+
         if not await is_approved(user_id):
-            target = update.callback_query or update.message
-            if target:
-                text = "🔒 You don't have access. Ask the owner to add you."
-                if hasattr(target, "answer"):
-                    await target.answer(text, show_alert=True)
-                else:
-                    await target.reply_text(text)
+            if isinstance(update, CallbackQuery):
+                await update.answer("🔒 You don't have access. Ask the owner to add you.", show_alert=True)
+            elif isinstance(update, Message):
+                await update.reply_text("🔒 You don't have access. Ask the owner to add you.")
             return
 
         # Force sub check (owner bypasses)
@@ -76,45 +83,43 @@ def require_approved(func):
             from bot.database import db
 
             channel_id = settings.bot.main_channel
-            if channel_id and not await check_subscription(ctx.bot, user_id, channel_id):
+            if channel_id and not await check_subscription(client, user_id, channel_id):
                 # Get channel invite link
                 invite_link = None
                 if db:
                     invite_link = await db.get_config("channel_invite_link")
 
-                target = update.callback_query or update.message
-                if target:
-                    text = "📢 You must join our channel to use this bot!"
-                    if invite_link:
-                        markup = InlineKeyboardMarkup([[
-                            InlineKeyboardButton("Join Channel", url=invite_link),
-                        ]])
-                    else:
-                        markup = None
-                        text += "\n\nPlease contact the owner for the channel link."
+                text = "📢 You must join our channel to use this bot!"
+                if invite_link:
+                    markup = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("Join Channel", url=invite_link),
+                    ]])
+                else:
+                    markup = None
+                    text += "\n\nPlease contact the owner for the channel link."
 
-                    if hasattr(target, "answer"):
-                        await target.answer(text, show_alert=True)
-                        if update.callback_query and update.callback_query.message:
-                            await update.callback_query.message.reply_text(
-                                text, reply_markup=markup,
-                            )
-                    else:
-                        await target.reply_text(text, reply_markup=markup)
+                if isinstance(update, CallbackQuery):
+                    await update.answer(text, show_alert=True)
+                    if update.message:
+                        await update.message.reply_text(text, reply_markup=markup)
+                elif isinstance(update, Message):
+                    await update.reply_text(text, reply_markup=markup)
                 return
 
-        return await func(update, ctx)
+        return await func(client, update)
     return wrapper
 
 
 def require_owner(func):
-    """Decorator: blocks non-owners."""
+    """Decorator: blocks non-owners.
+    
+    Pyrogram signature: async def handler(client: Client, message: Message)
+    """
     @wraps(func)
-    async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id if update.effective_user else 0
+    async def wrapper(client: Client, message: Message):
+        user_id = message.from_user.id if message.from_user else 0
         if not is_owner(user_id):
-            if update.message:
-                await update.message.reply_text("⚠️ This command is owner-only.")
+            await message.reply_text("⚠️ This command is owner-only.")
             return
-        return await func(update, ctx)
+        return await func(client, message)
     return wrapper

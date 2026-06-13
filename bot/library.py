@@ -5,8 +5,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from telegram import Bot
-from telegram.constants import ParseMode
+from pyrogram import Client, enums
 
 from bot.database import Database
 
@@ -34,8 +33,8 @@ def _get_lock(key: str) -> asyncio.Lock:
 
 
 class LibraryManager:
-    def __init__(self, bot: Bot, db: Database, main_channel: int, bot_username: str):
-        self.bot = bot
+    def __init__(self, client: Client, db: Database, main_channel: int, bot_username: str):
+        self.client = client
         self.db = db
         self.channel = main_channel
         self.bot_username = bot_username
@@ -182,22 +181,22 @@ class LibraryManager:
         try:
             poster = entry.get("poster_url")
             if poster:
-                msg = await self.bot.send_photo(
+                msg = await self.client.send_photo(
                     chat_id=self.channel,
                     photo=poster,
                     caption=caption[:CAPTION_LIMIT],
-                    parse_mode=ParseMode.HTML,
+                    parse_mode=enums.ParseMode.HTML,
                 )
             else:
-                msg = await self.bot.send_message(
+                msg = await self.client.send_message(
                     chat_id=self.channel,
                     text=caption,
-                    parse_mode=ParseMode.HTML,
+                    parse_mode=enums.ParseMode.HTML,
                     disable_web_page_preview=True,
                 )
             log.info("Created library message %d for %s [%s]",
-                     msg.message_id, entry["series_slug"], entry["quality"])
-            return msg.message_id
+                     msg.id, entry["series_slug"], entry["quality"])
+            return msg.id
         except Exception as e:
             log.error("Failed to create library message: %s", e)
             return None
@@ -210,18 +209,18 @@ class LibraryManager:
             return
         try:
             if entry.get("poster_url"):
-                await self.bot.edit_message_caption(
+                await self.client.edit_message_caption(
                     chat_id=self.channel,
                     message_id=msg_id,
                     caption=caption[:CAPTION_LIMIT],
-                    parse_mode=ParseMode.HTML,
+                    parse_mode=enums.ParseMode.HTML,
                 )
             else:
-                await self.bot.edit_message_text(
+                await self.client.edit_message_text(
                     chat_id=self.channel,
                     message_id=msg_id,
                     text=caption,
-                    parse_mode=ParseMode.HTML,
+                    parse_mode=enums.ParseMode.HTML,
                     disable_web_page_preview=True,
                 )
             log.info("Updated library message %d for %s [%s]",
@@ -286,5 +285,5 @@ def _ep_sort_key(key: str):
     return (999, 0)
 
 
-# Singleton — set during post_init
+# Singleton — set during startup
 library_manager: LibraryManager | None = None

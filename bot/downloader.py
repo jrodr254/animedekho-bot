@@ -1,4 +1,4 @@
-"""Download manager — handles video downloads and Telegram uploads."""
+"""Download manager — handles video downloads and Telegram uploads via Pyrogram (MTProto)."""
 
 from __future__ import annotations
 
@@ -11,16 +11,16 @@ import time
 from pathlib import Path
 
 import aiohttp
-from telegram import Message
-from telegram.constants import ParseMode
+from pyrogram import Client, enums
+from pyrogram.types import Message
 
 from api.models import Quality
 from utils.http import http_client
 
 log = logging.getLogger(__name__)
 
-# Telegram bot upload limit (50 MB)
-TG_UPLOAD_LIMIT = 50 * 1024 * 1024
+# Pyrogram MTProto upload limit (2 GB)
+TG_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024
 
 # Temp directory for downloads
 _TEMP_DIR = Path(tempfile.gettempdir()) / "animedekho_dl"
@@ -29,10 +29,9 @@ _TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 def sanitize_filename(name: str) -> str:
     """Remove special characters from filename, keep it clean."""
-    # Remove HTML entities and special chars
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', name)
     name = re.sub(r'[\s]+', ' ', name).strip()
-    name = name[:120]  # Reasonable length limit
+    name = name[:120]
     return name or "video"
 
 
@@ -62,7 +61,7 @@ async def _update_progress(msg: Message, text: str, last_edit: list[float]):
         return
     last_edit[0] = now
     try:
-        await msg.edit_text(text, parse_mode=ParseMode.HTML)
+        await msg.edit_text(text, parse_mode=enums.ParseMode.HTML)
     except Exception:
         pass  # Message unchanged or deleted
 
@@ -80,7 +79,7 @@ async def download_m3u8(
         await _update_progress(
             progress_msg,
             f"📥 <b>Downloading:</b> {title}\n{_progress_bar(0)}\n⏳ Starting ffmpeg...",
-            [0],  # force first update
+            [0],
         )
 
     proc = await asyncio.create_subprocess_exec(
@@ -94,8 +93,6 @@ async def download_m3u8(
         stderr=asyncio.subprocess.PIPE,
     )
 
-    # ffmpeg outputs progress to stderr
-    # We'll monitor the output file size for progress indication
     async def _monitor():
         start = time.time()
         while proc.returncode is None:
@@ -192,10 +189,11 @@ async def download_and_upload(
     filename: str,
     title: str,
     progress_msg: Message,
-    bot,
+    client: Client,
 ) -> tuple[bool, Message | None]:
     """
-    Download a video (m3u8 or mp4) and upload it to Telegram.
+    Download a video (m3u8 or mp4) and upload it to Telegram via Pyrogram (MTProto).
+    Supports up to 2GB uploads.
     Returns (success, sent_message).
     """
     output_path = str(_TEMP_DIR / filename)
@@ -212,7 +210,7 @@ async def download_and_upload(
         if not success:
             await progress_msg.edit_text(
                 f"❌ <b>Download failed:</b> {title}",
-                parse_mode=ParseMode.HTML,
+                parse_mode=enums.ParseMode.HTML,
             )
             return False, None
 
@@ -223,36 +221,52 @@ async def download_and_upload(
         if file_size == 0:
             await progress_msg.edit_text(
                 f"❌ <b>Download failed:</b> {title}\nFile is empty.",
-                parse_mode=ParseMode.HTML,
+                parse_mode=enums.ParseMode.HTML,
             )
             return False, None
 
         if file_size > TG_UPLOAD_LIMIT:
             await progress_msg.edit_text(
                 f"⚠️ <b>{title}</b>\n"
-                f"File too large for Telegram ({file_size_mb:.1f} MB > 50 MB limit).\n"
+                f"File too large for Telegram ({file_size_mb:.1f} MB > 2048 MB limit).\n"
                 f"Try a lower quality.",
-                parse_mode=ParseMode.HTML,
+                parse_mode=enums.ParseMode.HTML,
             )
             return False, None
 
-        # Upload
-        await progress_msg.edit_text(
-            f"📤 <b>Uploading:</b> {title}\n💾 {file_size_mb:.1f} MB",
-            parse_mode=ParseMode.HTML,
-        )
+        # Upload via Pyrogram (MTProto — supports up to 2GB)
+        upload_last_edit = [0.0]
 
-        with open(output_path, "rb") as f:
-            sent_msg = await bot.send_document(
-                chat_id=chat_id,
-                document=f,
-                filename=filename,
-                caption=f"📺 {title} [{quality.resolution}]",
+        async def _upload_progress(current: int, total: int):
+            """Pyrogram upload progress callback."""
+            pct = current / total * 100 if total > 0 else 0
+            current_mb = current / (1024 * 1024)
+            total_mb = total / (1024 * 1024)
+            await _update_progress(
+                progress_msg,
+                f"📤 <b>Uploading:</b> {title}\n"
+                f"{_progress_bar(pct)}\n"
+                f"💾 {current_mb:.1f} / {total_mb:.1f} MB",
+                upload_last_edit,
             )
 
         await progress_msg.edit_text(
+            f"📤 <b>Uploading:</b> {title}\n💾 {file_size_mb:.1f} MB",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+        # Use send_document for reliability (Pyrogram handles chunked upload via MTProto)
+        sent_msg = await client.send_document(
+            chat_id=chat_id,
+            document=output_path,
+            file_name=filename,
+            caption=f"📺 {title} [{quality.resolution}]",
+            progress=_upload_progress,
+        )
+
+        await progress_msg.edit_text(
             f"✅ <b>Done:</b> {title}\n💾 {file_size_mb:.1f} MB",
-            parse_mode=ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML,
         )
         return True, sent_msg
 
@@ -261,7 +275,7 @@ async def download_and_upload(
         try:
             await progress_msg.edit_text(
                 f"❌ <b>Error:</b> {title}\n{str(e)[:200]}",
-                parse_mode=ParseMode.HTML,
+                parse_mode=enums.ParseMode.HTML,
             )
         except Exception:
             pass

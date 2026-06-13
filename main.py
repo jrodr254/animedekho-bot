@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AnimeDekho Telegram Bot — entrypoint."""
+"""AnimeDekho Telegram Bot — entrypoint (Pyrogram/MTProto)."""
 
 import logging
 import sys
@@ -16,11 +16,11 @@ def main():
     )
 
     log = logging.getLogger("animedekho")
-    log.info("Starting AnimeDekho Bot...")
+    log.info("Starting AnimeDekho Bot (Pyrogram/MTProto)...")
 
     try:
         app = create_app()
-        app.run_polling(drop_pending_updates=True)
+        app.run()
     except KeyboardInterrupt:
         log.info("Shutting down...")
     except Exception as e:

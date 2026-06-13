@@ -43,6 +43,8 @@ class CacheConfig:
 @dataclass(frozen=True)
 class BotConfig:
     token: str = field(default_factory=lambda: os.environ.get("BOT_TOKEN", ""))
+    api_id: int = field(default_factory=lambda: int(os.environ.get("API_ID", "0")))
+    api_hash: str = field(default_factory=lambda: os.environ.get("API_HASH", ""))
     owner_id: int = field(default_factory=lambda: int(os.environ.get("OWNER_ID", "0")))
     main_channel: int = field(default_factory=lambda: int(os.environ.get("MAIN_CHANNEL", "0")))
     log_channel: int = field(default_factory=lambda: int(os.environ.get("LOG_CHANNEL", "0")))

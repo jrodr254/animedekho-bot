@@ -5,8 +5,7 @@ import json
 import logging
 from pathlib import Path
 
-from telegram import Bot
-from telegram.constants import ParseMode
+from pyrogram import Client, enums
 
 log = logging.getLogger(__name__)
 
@@ -15,8 +14,8 @@ _CONFIG_FILE = _DATA_DIR / "config.json"
 
 
 class BotLogger:
-    def __init__(self, bot: Bot):
-        self._bot = bot
+    def __init__(self, client: Client):
+        self._client = client
         self._log_channel: int = 0
         self._main_channel: int = 0
         self._load_config()
@@ -66,9 +65,9 @@ class BotLogger:
         if not self._log_channel:
             return
         try:
-            await self._bot.send_message(
+            await self._client.send_message(
                 self._log_channel, text,
-                parse_mode=ParseMode.HTML,
+                parse_mode=enums.ParseMode.HTML,
                 disable_web_page_preview=True,
             )
         except Exception as e:
@@ -78,9 +77,9 @@ class BotLogger:
         if not self._main_channel:
             return
         try:
-            await self._bot.send_message(
+            await self._client.send_message(
                 self._main_channel, text,
-                parse_mode=ParseMode.HTML,
+                parse_mode=enums.ParseMode.HTML,
                 disable_web_page_preview=True,
             )
         except Exception as e:
@@ -153,5 +152,5 @@ def _esc(text: str) -> str:
     return html.escape(str(text))
 
 
-# Singleton — set during post_init
+# Singleton — set during startup
 bot_logger: BotLogger | None = None

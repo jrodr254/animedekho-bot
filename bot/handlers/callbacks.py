@@ -5,9 +5,8 @@ import asyncio
 import logging
 import os
 
-from telegram import Update
-from telegram.ext import ContextTypes
-from telegram.constants import ParseMode
+from pyrogram import Client, enums
+from pyrogram.types import CallbackQuery
 
 from api.client import api
 from api.models import Quality
@@ -25,42 +24,41 @@ log = logging.getLogger(__name__)
 
 
 @require_approved
-async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = q.data
+async def callback_router(client: Client, query: CallbackQuery):
+    await query.answer()
+    data = query.data
 
     try:
         if data == "m:main":
-            await _send_text(q, "🎌 <b>AnimeDekho Bot</b>\n\nChoose an option:", kb.main_menu())
+            await _send_text(query, "🎌 <b>AnimeDekho Bot</b>\n\nChoose an option:", kb.main_menu())
 
         elif data == "m:genres":
-            await _handle_genres(q)
+            await _handle_genres(query)
 
         elif data.startswith("rp:"):
-            await _handle_series_listing(q, int(data.split(":")[1]))
+            await _handle_series_listing(query, int(data.split(":")[1]))
 
         elif data.startswith("mp:"):
-            await _handle_movies_listing(q, int(data.split(":")[1]))
+            await _handle_movies_listing(query, int(data.split(":")[1]))
 
         elif data.startswith("sr:"):
-            await _handle_series_detail(q, data[3:])
+            await _handle_series_detail(client, query, data[3:])
 
         elif data.startswith("mr:"):
-            await _handle_movie_detail(q, data[3:])
+            await _handle_movie_detail(client, query, data[3:])
 
         elif data.startswith("se:"):
             parts = data.split(":")
-            await _handle_season(q, slug=parts[1], season=int(parts[2]))
+            await _handle_season(query, slug=parts[1], season=int(parts[2]))
 
         elif data.startswith("ep:"):
-            await _handle_episode(q, data[3:])
+            await _handle_episode(query, data[3:])
 
         elif data.startswith("dl:"):
             # dl:server_idx:quality_idx:ep_slug
             parts = data.split(":", 3)
             await _handle_download(
-                q, ctx,
+                client, query,
                 server_idx=int(parts[1]),
                 quality_idx=int(parts[2]),
                 ep_slug=parts[3],
@@ -70,7 +68,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # mdl:server_idx:quality_idx:movie_slug
             parts = data.split(":", 3)
             await _handle_movie_download(
-                q, ctx,
+                client, query,
                 server_idx=int(parts[1]),
                 quality_idx=int(parts[2]),
                 movie_slug=parts[3],
@@ -79,13 +77,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("bat:"):
             # bat:series_slug:season — show quality picker
             parts = data.split(":", 2)
-            await _handle_batch_picker(q, slug=parts[1], season=int(parts[2]))
+            await _handle_batch_picker(query, slug=parts[1], season=int(parts[2]))
 
         elif data.startswith("bq:"):
             # bq:series_slug:season:quality — execute batch download
             parts = data.split(":", 3)
             await _handle_batch_download(
-                q, ctx,
+                client, query,
                 slug=parts[1],
                 season=int(parts[2]),
                 quality_pref=parts[3],
@@ -93,18 +91,18 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         elif data.startswith("ct:"):
             parts = data.split(":")
-            await _handle_category(q, cat_slug=parts[1], page=int(parts[2]))
+            await _handle_category(query, cat_slug=parts[1], page=int(parts[2]))
 
     except Exception as e:
         log.exception("Callback error for %s", data)
         if bot_logger:
             await bot_logger.log_error(f"callback:{data}", str(e))
-        await _safe_edit(q, f"⚠️ Error: {esc(str(e)[:200])}\n\nTry /start")
+        await _safe_edit(query, f"⚠️ Error: {esc(str(e)[:200])}\n\nTry /start")
 
 
 # ── Handler implementations ───────────────────────────────────────
 
-async def _handle_series_listing(q, page: int):
+async def _handle_series_listing(q: CallbackQuery, page: int):
     result = await api.get_recent_series(page)
     if not result.items:
         await _send_text(q, "No series found.")
@@ -113,7 +111,7 @@ async def _handle_series_listing(q, page: int):
     await _send_text(q, f"📺 <b>Recent Series</b> — Page {page}/{result.max_page}", markup)
 
 
-async def _handle_movies_listing(q, page: int):
+async def _handle_movies_listing(q: CallbackQuery, page: int):
     result = await api.get_recent_movies(page)
     if not result.items:
         await _send_text(q, "No movies found.")
@@ -122,7 +120,7 @@ async def _handle_movies_listing(q, page: int):
     await _send_text(q, f"🎬 <b>Movies</b> — Page {page}/{result.max_page}", markup)
 
 
-async def _handle_series_detail(q, slug: str):
+async def _handle_series_detail(client: Client, q: CallbackQuery, slug: str):
     series = await api.get_series(slug)
 
     text = f"📺 <b>{esc(series.title)}</b>\n\n"
@@ -143,17 +141,18 @@ async def _handle_series_detail(q, slug: str):
             await q.message.delete()
         except Exception:
             pass
-        await q.message.chat.send_photo(
+        await client.send_photo(
+            chat_id=q.message.chat.id,
             photo=series.poster,
             caption=text[:1024],
-            parse_mode=ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML,
             reply_markup=markup,
         )
     else:
         await _send_text(q, text, markup)
 
 
-async def _handle_movie_detail(q, slug: str):
+async def _handle_movie_detail(client: Client, q: CallbackQuery, slug: str):
     movie = await api.get_movie(slug)
 
     # Resolve servers
@@ -180,7 +179,7 @@ async def _handle_movie_detail(q, slug: str):
         text += "\n⚠️ No direct servers found — use 'Watch on Site'."
 
     # Store for download callbacks
-    _store_servers(q.message.chat_id, f"movie:{slug}", resolved, movie.title)
+    _store_servers(q.message.chat.id, f"movie:{slug}", resolved, movie.title)
 
     markup = kb.movie_detail(movie)
 
@@ -189,17 +188,18 @@ async def _handle_movie_detail(q, slug: str):
             await q.message.delete()
         except Exception:
             pass
-        await q.message.chat.send_photo(
+        await client.send_photo(
+            chat_id=q.message.chat.id,
             photo=movie.poster,
             caption=text[:1024],
-            parse_mode=ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML,
             reply_markup=markup,
         )
     else:
         await _send_text(q, text, markup)
 
 
-async def _handle_season(q, slug: str, season: int):
+async def _handle_season(q: CallbackQuery, slug: str, season: int):
     series = await api.get_series(slug)
     s = series.seasons.get(season)
     if not s:
@@ -214,12 +214,12 @@ async def _handle_season(q, slug: str, season: int):
     markup = kb.episode_picker(slug, season, s.episodes)
 
     try:
-        await q.edit_message_caption(caption=text[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
+        await q.edit_message_caption(caption=text[:1024], parse_mode=enums.ParseMode.HTML, reply_markup=markup)
     except Exception:
         await _safe_edit(q, text, markup)
 
 
-async def _handle_episode(q, ep_slug: str):
+async def _handle_episode(q: CallbackQuery, ep_slug: str):
     episode = await api.get_episode(ep_slug)
 
     # Resolve all servers
@@ -241,7 +241,7 @@ async def _handle_episode(q, ep_slug: str):
         text += f"🖥 <b>{len(resolved)} server(s) found:</b>\n"
         for srv in resolved[:7]:
             if srv.qualities:
-                quals = ", ".join(q.resolution for q in srv.qualities[:4])
+                quals = ", ".join(sq.resolution for sq in srv.qualities[:4])
                 text += f"  • {srv.name} — {quals}\n"
             elif srv.player_url:
                 from urllib.parse import urlparse
@@ -258,22 +258,22 @@ async def _handle_episode(q, ep_slug: str):
     back_cb = f"sr:{short_slug(series_slug)}" if series_slug else "rp:1"
 
     # Store resolved servers in context for download callbacks
-    _store_servers(q.message.chat_id, ep_slug, resolved, episode.title)
+    _store_servers(q.message.chat.id, ep_slug, resolved, episode.title)
 
     markup = kb.server_picker(resolved, ep_slug, back_cb)
 
     try:
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await q.edit_message_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=markup)
     except Exception:
         try:
-            await q.edit_message_caption(caption=text[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
+            await q.edit_message_caption(caption=text[:1024], parse_mode=enums.ParseMode.HTML, reply_markup=markup)
         except Exception:
-            await q.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            await q.message.reply_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=markup)
 
 
-async def _handle_download(q, ctx, server_idx: int, quality_idx: int, ep_slug: str):
+async def _handle_download(client: Client, q: CallbackQuery, server_idx: int, quality_idx: int, ep_slug: str):
     """Handle single episode download."""
-    chat_id = q.message.chat_id
+    chat_id = q.message.chat.id
     user = q.from_user
 
     # Get stored server data or re-resolve
@@ -319,7 +319,7 @@ async def _handle_download(q, ctx, server_idx: int, quality_idx: int, ep_slug: s
                 await q.message.reply_video(
                     video=cached_fid,
                     caption=f"📦 <b>{esc(title)}</b> [{quality.resolution}]\n<i>From library — no download needed!</i>",
-                    parse_mode=ParseMode.HTML,
+                    parse_mode=enums.ParseMode.HTML,
                 )
                 return
             except Exception as e:
@@ -337,12 +337,12 @@ async def _handle_download(q, ctx, server_idx: int, quality_idx: int, ep_slug: s
     # Send progress message and start download in background
     progress_msg = await q.message.reply_text(
         f"📥 <b>Starting download:</b> {esc(title)} [{quality.resolution}]",
-        parse_mode=ParseMode.HTML,
+        parse_mode=enums.ParseMode.HTML,
     )
 
     asyncio.create_task(
         _do_download(
-            ctx.bot, chat_id, quality, filename, title, progress_msg, user,
+            client, chat_id, quality, filename, title, progress_msg, user,
             series_slug=series_slug or "",
             episode_key=episode_key,
             poster_url=poster_url,
@@ -350,9 +350,9 @@ async def _handle_download(q, ctx, server_idx: int, quality_idx: int, ep_slug: s
     )
 
 
-async def _handle_movie_download(q, ctx, server_idx: int, quality_idx: int, movie_slug: str):
+async def _handle_movie_download(client: Client, q: CallbackQuery, server_idx: int, quality_idx: int, movie_slug: str):
     """Handle movie download."""
-    chat_id = q.message.chat_id
+    chat_id = q.message.chat.id
     user = q.from_user
 
     # Get stored server data or re-resolve
@@ -388,7 +388,7 @@ async def _handle_movie_download(q, ctx, server_idx: int, quality_idx: int, movi
                 await q.message.reply_video(
                     video=cached_fid,
                     caption=f"📦 <b>{esc(title)}</b> [{quality.resolution}]\n<i>From library — no download needed!</i>",
-                    parse_mode=ParseMode.HTML,
+                    parse_mode=enums.ParseMode.HTML,
                 )
                 return
             except Exception as e:
@@ -401,12 +401,12 @@ async def _handle_movie_download(q, ctx, server_idx: int, quality_idx: int, movi
 
     progress_msg = await q.message.reply_text(
         f"📥 <b>Starting download:</b> {esc(title)} [{quality.resolution}]",
-        parse_mode=ParseMode.HTML,
+        parse_mode=enums.ParseMode.HTML,
     )
 
     asyncio.create_task(
         _do_download(
-            ctx.bot, chat_id, quality, filename, title, progress_msg, user,
+            client, chat_id, quality, filename, title, progress_msg, user,
             series_slug=movie_slug,
             episode_key="movie",
             is_movie=True,
@@ -414,7 +414,7 @@ async def _handle_movie_download(q, ctx, server_idx: int, quality_idx: int, movi
     )
 
 
-async def _handle_batch_picker(q, slug: str, season: int):
+async def _handle_batch_picker(q: CallbackQuery, slug: str, season: int):
     """Show quality picker for batch download."""
     text = (
         f"📦 <b>Batch Download</b>\n"
@@ -425,9 +425,9 @@ async def _handle_batch_picker(q, slug: str, season: int):
     await _safe_edit(q, text, markup)
 
 
-async def _handle_batch_download(q, ctx, slug: str, season: int, quality_pref: str):
+async def _handle_batch_download(client: Client, q: CallbackQuery, slug: str, season: int, quality_pref: str):
     """Execute batch download for an entire season."""
-    chat_id = q.message.chat_id
+    chat_id = q.message.chat.id
     user = q.from_user
 
     # Get series info
@@ -450,19 +450,19 @@ async def _handle_batch_download(q, ctx, slug: str, season: int, quality_pref: s
         f"📺 {esc(series.title)} — Season {season}\n"
         f"📂 {total} episodes · Quality: {quality_pref}\n\n"
         f"⏳ Resolving episodes...",
-        parse_mode=ParseMode.HTML,
+        parse_mode=enums.ParseMode.HTML,
     )
 
     # Run batch in background
     asyncio.create_task(
         _do_batch_download(
-            ctx.bot, chat_id, series, season, s.episodes,
+            client, chat_id, series, season, s.episodes,
             quality_pref, progress_msg, user
         )
     )
 
 
-async def _do_batch_download(bot, chat_id, series, season, episodes, quality_pref, progress_msg, user):
+async def _do_batch_download(client: Client, chat_id, series, season, episodes, quality_pref, progress_msg, user):
     """Execute batch download sequentially."""
     total = len(episodes)
     completed = 0
@@ -473,7 +473,7 @@ async def _do_batch_download(bot, chat_id, series, season, episodes, quality_pre
                 f"📦 <b>Batch Download</b> — {esc(series.title)} S{season}\n\n"
                 f"📥 Downloading S{season}E{ep.number}... ({i}/{total})\n"
                 f"✅ {completed} completed",
-                parse_mode=ParseMode.HTML,
+                parse_mode=enums.ParseMode.HTML,
             )
         except Exception:
             pass
@@ -486,11 +486,11 @@ async def _do_batch_download(bot, chat_id, series, season, episodes, quality_pre
                 cached_fid = await db.get_cached_file(series.slug, quality_pref, ep_key)
                 if cached_fid:
                     try:
-                        await bot.send_video(
+                        await client.send_video(
                             chat_id,
                             video=cached_fid,
                             caption=f"📦 <b>{esc(series.title)} {ep_key}</b> [{quality_pref}]\n<i>From library</i>",
-                            parse_mode=ParseMode.HTML,
+                            parse_mode=enums.ParseMode.HTML,
                         )
                         completed += 1
                         continue
@@ -515,16 +515,16 @@ async def _do_batch_download(bot, chat_id, series, season, episodes, quality_pre
             filename = make_episode_filename(series.title, season, ep.number, quality.resolution)
 
             # Create a per-episode progress message
-            ep_msg = await bot.send_message(
+            ep_msg = await client.send_message(
                 chat_id,
                 f"📥 <b>Downloading:</b> S{season}E{ep.number} [{quality.resolution}]",
-                parse_mode=ParseMode.HTML,
+                parse_mode=enums.ParseMode.HTML,
             )
 
             success, sent_msg = await download_and_upload(
                 chat_id, quality, filename,
                 f"{series.title} S{season}E{ep.number}",
-                ep_msg, bot,
+                ep_msg, client,
             )
 
             if success:
@@ -606,7 +606,7 @@ async def _do_batch_download(bot, chat_id, series, season, episodes, quality_pre
             f"{'✅' if completed == total else '⚠️'} <b>Batch complete!</b>\n"
             f"📺 {esc(series.title)} — Season {season}\n"
             f"✅ {completed}/{total} episodes uploaded.",
-            parse_mode=ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML,
         )
     except Exception:
         pass
@@ -615,12 +615,12 @@ async def _do_batch_download(bot, chat_id, series, season, episodes, quality_pre
         await bot_logger.log_batch_complete(series.title, season, completed, total)
 
 
-async def _do_download(bot, chat_id, quality, filename, title, progress_msg, user,
+async def _do_download(client: Client, chat_id, quality, filename, title, progress_msg, user,
                        series_slug="", episode_key="", poster_url=None, is_movie=False):
     """Background task for single download."""
     try:
         success, sent_msg = await download_and_upload(
-            chat_id, quality, filename, title, progress_msg, bot
+            chat_id, quality, filename, title, progress_msg, client
         )
         if success and bot_logger:
             await bot_logger.log_download_complete(title, quality.resolution, 0)
@@ -684,13 +684,13 @@ async def _do_download(bot, chat_id, quality, filename, title, progress_msg, use
         try:
             await progress_msg.edit_text(
                 f"❌ <b>Error:</b> {esc(title)}\n{esc(str(e)[:200])}",
-                parse_mode=ParseMode.HTML,
+                parse_mode=enums.ParseMode.HTML,
             )
         except Exception:
             pass
 
 
-async def _handle_genres(q):
+async def _handle_genres(q: CallbackQuery):
     cats = await api.get_categories()
     if not cats:
         await _send_text(q, "⚠️ Could not load genres.")
@@ -698,7 +698,7 @@ async def _handle_genres(q):
     await _send_text(q, "📂 <b>Browse by Genre</b>", kb.genre_list(cats))
 
 
-async def _handle_category(q, cat_slug: str, page: int):
+async def _handle_category(q: CallbackQuery, cat_slug: str, page: int):
     result = await api.get_category_items(cat_slug, page)
     if not result.items:
         await _send_text(q, "No items found in this category.")
@@ -809,18 +809,18 @@ def _get_servers(chat_id: int, key: str) -> dict | None:
 
 # ── Utilities ─────────────────────────────────────────────────────
 
-async def _send_text(q, text: str, markup=None):
+async def _send_text(q: CallbackQuery, text: str, markup=None):
     try:
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await q.edit_message_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=markup)
     except Exception:
         try:
-            await q.edit_message_caption(caption=text[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
+            await q.edit_message_caption(caption=text[:1024], parse_mode=enums.ParseMode.HTML, reply_markup=markup)
         except Exception:
-            await q.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            await q.message.reply_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=markup)
 
 
-async def _safe_edit(q, text: str, markup=None):
+async def _safe_edit(q: CallbackQuery, text: str, markup=None):
     try:
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await q.edit_message_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=markup)
     except Exception:
-        await q.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await q.message.reply_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=markup)
