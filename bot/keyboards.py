@@ -231,6 +231,48 @@ def category_page(
     return InlineKeyboardMarkup(buttons)
 
 
+def quality_picker(
+    qualities: set[str],
+    slug: str,
+    back_cb: str,
+    is_movie: bool = False,
+) -> InlineKeyboardMarkup:
+    """Show quality-only download buttons. No server names."""
+    buttons = []
+    prefix = "mdl" if is_movie else "dl"
+
+    sorted_q = sorted(
+        qualities,
+        key=lambda q: {"360p": 1, "480p": 2, "720p": 3, "1080p": 4, "auto": 5}.get(q, 99),
+    )
+
+    row: list[InlineKeyboardButton] = []
+    for q in sorted_q:
+        cb = f"{prefix}:{q}:{short_slug(slug, 45)}"
+        label = f"📥 {q}"
+        if q == "1080p":
+            label = "📥 1080p (FHD)"
+        elif q == "720p":
+            label = "📥 720p (HD)"
+        elif q == "480p":
+            label = "📥 480p (SD)"
+        elif q == "auto":
+            label = "📥 Auto"
+        row.append(InlineKeyboardButton(label, callback_data=cb))
+        if len(row) >= 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    # Watch on site
+    path = "movie-hindi" if is_movie else "epi"
+    site_url = f"https://animedekho.app/{path}/{slug}/"
+    buttons.append([InlineKeyboardButton("🌐 Watch on Site", url=site_url)])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb), _menu_btn()])
+    return InlineKeyboardMarkup(buttons)
+
+
 def movie_detail(movie, back_cb: str = "mp:1") -> InlineKeyboardMarkup:
     """Movie detail with download buttons."""
     return movie_server_picker(movie.servers, movie.slug, back_cb)

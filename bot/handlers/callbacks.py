@@ -55,23 +55,21 @@ async def callback_router(client: Client, query: CallbackQuery):
             await _handle_episode(query, data[3:])
 
         elif data.startswith("dl:"):
-            # dl:server_idx:quality_idx:ep_slug
-            parts = data.split(":", 3)
+            # dl:quality:ep_slug — auto server selection
+            parts = data.split(":", 2)
             await _handle_download(
                 client, query,
-                server_idx=int(parts[1]),
-                quality_idx=int(parts[2]),
-                ep_slug=parts[3],
+                quality_pref=parts[1],
+                ep_slug=parts[2],
             )
 
         elif data.startswith("mdl:"):
-            # mdl:server_idx:quality_idx:movie_slug
-            parts = data.split(":", 3)
+            # mdl:quality:movie_slug — auto server selection
+            parts = data.split(":", 2)
             await _handle_movie_download(
                 client, query,
-                server_idx=int(parts[1]),
-                quality_idx=int(parts[2]),
-                movie_slug=parts[3],
+                quality_pref=parts[1],
+                movie_slug=parts[2],
             )
 
         elif data.startswith("bat:"):
@@ -167,21 +165,33 @@ async def _handle_movie_detail(client: Client, q: CallbackQuery, slug: str):
         for srv in movie.servers:
             await bot_logger.log_server_resolve(movie.title, srv.name, srv.is_available)
 
+    # Collect all unique qualities across ALL servers
+    all_qualities: set[str] = set()
+    for srv in resolved:
+        for sq in srv.qualities:
+            all_qualities.add(sq.resolution)
+        if srv.direct_url:
+            all_qualities.add("auto")
+
     text = f"🎬 <b>{esc(movie.title)}</b>\n\n"
     if movie.genres:
         text += f"🏷 {', '.join(movie.genres[:6])}\n"
     if movie.description:
         text += f"\n{esc(truncate(movie.description, 350))}\n"
 
-    if resolved:
-        text += f"\n▶️ <b>{len(resolved)} server(s) available</b>"
+    if all_qualities:
+        sorted_q = _sort_qualities(all_qualities)
+        text += f"\n📊 <b>Available Qualities:</b> {', '.join(sorted_q)}\n"
+        text += "\nSelect a quality to download:"
+    elif resolved:
+        text += "\n📥 Tap download to start:"
     else:
         text += "\n⚠️ No direct servers found — use 'Watch on Site'."
 
     # Store for download callbacks
     _store_servers(q.message.chat.id, f"movie:{slug}", resolved, movie.title)
 
-    markup = kb.movie_detail(movie)
+    markup = kb.quality_picker(all_qualities, slug, "mp:1", is_movie=True)
 
     if movie.poster:
         try:
@@ -228,7 +238,15 @@ async def _handle_episode(q: CallbackQuery, ep_slug: str):
     # Populate qualities for resolved servers
     await _populate_server_qualities(resolved)
 
-    # Log resolution
+    # Collect all unique qualities across ALL servers
+    all_qualities = set()
+    for srv in resolved:
+        for sq in srv.qualities:
+            all_qualities.add(sq.resolution)
+        if srv.direct_url:
+            all_qualities.add("auto")
+
+    # Log
     if bot_logger:
         for srv in resolved:
             await bot_logger.log_server_resolve(
@@ -237,18 +255,12 @@ async def _handle_episode(q: CallbackQuery, ep_slug: str):
 
     text = f"▶️ <b>{esc(episode.title)}</b>\n\n"
 
-    if resolved:
-        text += f"🖥 <b>{len(resolved)} server(s) found:</b>\n"
-        for srv in resolved[:7]:
-            if srv.qualities:
-                quals = ", ".join(sq.resolution for sq in srv.qualities[:4])
-                text += f"  • {srv.name} — {quals}\n"
-            elif srv.player_url:
-                from urllib.parse import urlparse
-                domain = urlparse(srv.player_url).netloc
-                text += f"  • {srv.name} — {domain}\n"
-            elif srv.direct_url:
-                text += f"  • {srv.name} — Direct {srv.video_type.upper()}\n"
+    if all_qualities:
+        sorted_q = _sort_qualities(all_qualities)
+        text += f"📊 <b>Available Qualities:</b> {', '.join(sorted_q)}\n\n"
+        text += "Select a quality to download:"
+    elif resolved:
+        text += "📥 Tap download to start:"
     else:
         text += "⚠️ Could not extract servers. Use 'Watch on Site'.\n"
         if bot_logger:
@@ -257,10 +269,10 @@ async def _handle_episode(q: CallbackQuery, ep_slug: str):
     series_slug = extract_series_slug(ep_slug)
     back_cb = f"sr:{short_slug(series_slug)}" if series_slug else "rp:1"
 
-    # Store resolved servers in context for download callbacks
+    # Store resolved servers for download callbacks
     _store_servers(q.message.chat.id, ep_slug, resolved, episode.title)
 
-    markup = kb.server_picker(resolved, ep_slug, back_cb)
+    markup = kb.quality_picker(all_qualities, ep_slug, back_cb, is_movie=False)
 
     try:
         await q.edit_message_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=markup)
@@ -271,8 +283,8 @@ async def _handle_episode(q: CallbackQuery, ep_slug: str):
             await q.message.reply_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=markup)
 
 
-async def _handle_download(client: Client, q: CallbackQuery, server_idx: int, quality_idx: int, ep_slug: str):
-    """Handle single episode download."""
+async def _handle_download(client: Client, q: CallbackQuery, quality_pref: str, ep_slug: str):
+    """Handle single episode download — auto-picks server."""
     chat_id = q.message.chat.id
     user = q.from_user
 
@@ -286,34 +298,16 @@ async def _handle_download(client: Client, q: CallbackQuery, server_idx: int, qu
         _store_servers(chat_id, ep_slug, resolved, episode.title)
         data = _get_servers(chat_id, ep_slug)
 
-    if not data or server_idx >= len(data["servers"]):
-        await _safe_edit(q, "⚠️ Server not found. Please go back and try again.")
+    if not data or not data["servers"]:
+        await _safe_edit(q, "⚠️ No servers found. Please go back and try again.")
         return
 
-    srv = data["servers"][server_idx]
     title = data.get("title", ep_slug)
     all_servers = data["servers"]
 
-    # Determine quality/URL to download
-    quality = _pick_quality(srv, quality_idx)
-    
-    # If quality not found on selected server, search ALL servers
-    if not quality:
-        log.info("Quality idx %d not on server %d, searching all servers...", quality_idx, server_idx)
-        # Try to find the same resolution on other servers
-        target_res = None
-        if srv.qualities and quality_idx < len(srv.qualities):
-            target_res = srv.qualities[quality_idx].resolution
-        
-        if target_res:
-            quality = _find_quality_match(all_servers, target_res)
-        else:
-            # Fallback: get best available from any server
-            quality = _find_quality_match(all_servers, "auto")
-        
-        if quality:
-            log.info("Found quality %s on another server", quality.resolution)
-    
+    # Auto-find the quality across all servers
+    quality = _find_quality_match(all_servers, quality_pref)
+
     if not quality:
         await _safe_edit(q, "⚠️ No downloadable URL found on any server.")
         return
@@ -369,8 +363,8 @@ async def _handle_download(client: Client, q: CallbackQuery, server_idx: int, qu
     )
 
 
-async def _handle_movie_download(client: Client, q: CallbackQuery, server_idx: int, quality_idx: int, movie_slug: str):
-    """Handle movie download."""
+async def _handle_movie_download(client: Client, q: CallbackQuery, quality_pref: str, movie_slug: str):
+    """Handle movie download — auto-picks server."""
     chat_id = q.message.chat.id
     user = q.from_user
 
@@ -384,33 +378,18 @@ async def _handle_movie_download(client: Client, q: CallbackQuery, server_idx: i
         _store_servers(chat_id, f"movie:{movie_slug}", resolved, movie.title)
         data = _get_servers(chat_id, f"movie:{movie_slug}")
 
-    if not data or server_idx >= len(data["servers"]):
-        await _safe_edit(q, "⚠️ Server not found. Please go back and try again.")
+    if not data or not data["servers"]:
+        await _safe_edit(q, "⚠️ No servers found. Please go back and try again.")
         return
 
-    srv = data["servers"][server_idx]
     title = data.get("title", slug_to_title(movie_slug))
     all_servers = data["servers"]
 
-    quality = _pick_quality(srv, quality_idx)
-    
-    # If quality not found on selected server, search ALL servers
+    # Auto-find the quality across all servers
+    quality = _find_quality_match(all_servers, quality_pref)
+
     if not quality:
-        log.info("Quality idx %d not on movie server %d, searching all servers...", quality_idx, server_idx)
-        target_res = None
-        if srv.qualities and quality_idx < len(srv.qualities):
-            target_res = srv.qualities[quality_idx].resolution
-        
-        if target_res:
-            quality = _find_quality_match(all_servers, target_res)
-        else:
-            quality = _find_quality_match(all_servers, "auto")
-        
-        if quality:
-            log.info("Found movie quality %s on another server", quality.resolution)
-    
-    if not quality:
-        await _safe_edit(q, "⚠️ No downloadable URL found for this server.")
+        await _safe_edit(q, "⚠️ No downloadable URL found on any server.")
         return
 
     filename = make_movie_filename(title, quality.resolution)
@@ -745,6 +724,13 @@ async def _handle_category(q: CallbackQuery, cat_slug: str, page: int):
 
 
 # ── Quality / Server helpers ─────────────────────────────────────────
+
+
+def _sort_qualities(qualities: set[str]) -> list[str]:
+    """Sort quality strings like 360p, 480p, 720p, 1080p."""
+    order = {"360p": 1, "480p": 2, "720p": 3, "1080p": 4, "auto": 5}
+    return sorted(qualities, key=lambda q: order.get(q, 99))
+
 
 async def _populate_server_qualities(servers: list):
     """For each server with a player_url, try to resolve and populate qualities."""
