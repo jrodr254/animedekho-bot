@@ -292,11 +292,30 @@ async def _handle_download(client: Client, q: CallbackQuery, server_idx: int, qu
 
     srv = data["servers"][server_idx]
     title = data.get("title", ep_slug)
+    all_servers = data["servers"]
 
     # Determine quality/URL to download
     quality = _pick_quality(srv, quality_idx)
+    
+    # If quality not found on selected server, search ALL servers
     if not quality:
-        await _safe_edit(q, "⚠️ No downloadable URL found for this server.")
+        log.info("Quality idx %d not on server %d, searching all servers...", quality_idx, server_idx)
+        # Try to find the same resolution on other servers
+        target_res = None
+        if srv.qualities and quality_idx < len(srv.qualities):
+            target_res = srv.qualities[quality_idx].resolution
+        
+        if target_res:
+            quality = _find_quality_match(all_servers, target_res)
+        else:
+            # Fallback: get best available from any server
+            quality = _find_quality_match(all_servers, "auto")
+        
+        if quality:
+            log.info("Found quality %s on another server", quality.resolution)
+    
+    if not quality:
+        await _safe_edit(q, "⚠️ No downloadable URL found on any server.")
         return
 
     # Extract season/episode info for filename
@@ -371,8 +390,25 @@ async def _handle_movie_download(client: Client, q: CallbackQuery, server_idx: i
 
     srv = data["servers"][server_idx]
     title = data.get("title", slug_to_title(movie_slug))
+    all_servers = data["servers"]
 
     quality = _pick_quality(srv, quality_idx)
+    
+    # If quality not found on selected server, search ALL servers
+    if not quality:
+        log.info("Quality idx %d not on movie server %d, searching all servers...", quality_idx, server_idx)
+        target_res = None
+        if srv.qualities and quality_idx < len(srv.qualities):
+            target_res = srv.qualities[quality_idx].resolution
+        
+        if target_res:
+            quality = _find_quality_match(all_servers, target_res)
+        else:
+            quality = _find_quality_match(all_servers, "auto")
+        
+        if quality:
+            log.info("Found movie quality %s on another server", quality.resolution)
+    
     if not quality:
         await _safe_edit(q, "⚠️ No downloadable URL found for this server.")
         return
