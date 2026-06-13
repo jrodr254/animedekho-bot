@@ -35,4 +35,5 @@ def register_handlers(app: Client):
     app.add_handler(CallbackQueryHandler(callback_router))
 
     # Text messages (search) — must be last to avoid catching commands
-    app.add_handler(MessageHandler(handle_text, filters.text & ~filters.command & filters.private))
+    # Note: filters.regex matches non-command text (doesn't start with /)
+    app.add_handler(MessageHandler(handle_text, filters.text & filters.private & filters.regex(r"^[^/]")))
