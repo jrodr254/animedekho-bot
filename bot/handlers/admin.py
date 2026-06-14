@@ -70,9 +70,13 @@ async def cmd_setlogchannel(client: Client, message: Message):
         return
     cid = int(args[0])
     if bot.logger.bot_logger:
-        bot.logger.bot_logger.set_log_channel(cid)
-        await message.reply_text(f"✅ Log channel set to <code>{cid}</code>", parse_mode=enums.ParseMode.HTML)
-        await bot.logger.bot_logger._send_log("🔗 Log channel connected!")
+        # Test sending a message to the channel
+        try:
+            await client.send_message(cid, "🔗 Log channel connected!")
+            await message.reply_text(f"✅ Log channel set to <code>{cid}</code>\nTest message sent successfully!", parse_mode=enums.ParseMode.HTML)
+            bot.logger.bot_logger.set_log_channel(cid)
+        except Exception as e:
+            await message.reply_text(f"❌ Failed to send message to log channel <code>{cid}</code>.\nError: <code>{e}</code>\n\nMake sure the bot is an admin with 'Send Messages' permission and the ID starts with -100.", parse_mode=enums.ParseMode.HTML)
     else:
         await message.reply_text("⚠️ Logger not initialized yet.")
 
@@ -86,11 +90,17 @@ async def cmd_setmainchannel(client: Client, message: Message):
     cid = int(args[0])
     if bot.logger.bot_logger:
         bot.logger.bot_logger.set_main_channel(cid)
-        import bot.library
-        if bot.library.library_manager:
-            bot.library.library_manager.channel = cid
-        await message.reply_text(f"✅ Main channel set to <code>{cid}</code>", parse_mode=enums.ParseMode.HTML)
-        await bot.logger.bot_logger._send_main("🔗 Main channel connected!")
+        from bot.library import library_manager
+        if library_manager:
+            library_manager.channel = cid
+        
+        # Test sending a message to the channel
+        try:
+            await client.send_message(cid, "🔗 Main channel connected!")
+            await message.reply_text(f"✅ Main channel set to <code>{cid}</code>\nTest message sent successfully!", parse_mode=enums.ParseMode.HTML)
+            bot.logger.bot_logger.set_main_channel(cid)
+        except Exception as e:
+            await message.reply_text(f"❌ Failed to send message to main channel <code>{cid}</code>.\nError: <code>{e}</code>\n\nMake sure the bot is an admin with 'Send Messages' permission and the ID starts with -100.", parse_mode=enums.ParseMode.HTML)
     else:
         await message.reply_text("⚠️ Logger not initialized yet.")
 
