@@ -41,8 +41,28 @@ async def _on_start(client: Client):
         bot_username=bot_username,
     )
     log.info("Library manager initialized (bot: @%s)", bot_username)
-
-
+    # Set bot commands menu
+    from pyrogram.types import BotCommand, BotCommandScopeChat
+    try:
+        # Default commands for everyone
+        await client.set_bot_commands([
+            BotCommand("start", "Main menu & Search"),
+            BotCommand("help", "Show help message"),
+        ])
+        # Owner commands
+        await client.set_bot_commands([
+            BotCommand("start", "Main menu & Search"),
+            BotCommand("help", "Show help message"),
+            BotCommand("adduser", "Approve a user"),
+            BotCommand("removeuser", "Remove a user"),
+            BotCommand("users", "List approved users"),
+            BotCommand("setlogchannel", "Set log channel ID"),
+            BotCommand("setmainchannel", "Set main channel ID"),
+            BotCommand("setchannellink", "Set channel invite link"),
+        ], scope=BotCommandScopeChat(settings.bot.owner_id))
+        log.info("Bot commands set successfully")
+    except Exception as e:
+        log.warning("Failed to set bot commands: %s", e)
 async def _on_stop(client: Client):
     """Called on shutdown — cleanup."""
     from utils.http import http_client
