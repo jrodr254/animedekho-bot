@@ -171,13 +171,6 @@ def quality_picker(
     if row:
         buttons.append(row)
 
-    # Watch on site — only add if URL is valid
-    path = "movie-hindi" if is_movie else "epi"
-    site_url = f"https://animedekho.app/{path}/{slug}/"
-    url_btn = _safe_url_btn("🌐 Watch on Site", site_url)
-    if url_btn:
-        buttons.append([url_btn])
-
     buttons.append([InlineKeyboardButton("🔙 Back", callback_data=_safe_cb(back_cb)), _menu_btn()])
     return InlineKeyboardMarkup(buttons)
 

@@ -115,14 +115,15 @@ async def n_m3u8dl_re_download(
         "--download-retry-count", "5",  # Retry failed segments
         "--binary-merge",             # Use binary merge (faster)
         "--mux-after-done", "format=mp4",  # Mux to mp4 using ffmpeg
+        "--select-audio", "all",      # Download all available audio tracks
+        "--select-subtitle", "all",   # Download all available subtitles
     ]
 
     # If it's a master playlist URL, select the specific quality
     height = quality.replace("p", "")
     if height.isdigit():
-        cmd.extend(["--auto-select",])
-        # N_m3u8DL-RE supports selecting by resolution filter
-        cmd.extend(["--select-video", f"res=\"*x{height}\""])
+        # Select video stream matching the resolution height (e.g. res=1080)
+        cmd.extend(["--select-video", f"res={height}"])
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
