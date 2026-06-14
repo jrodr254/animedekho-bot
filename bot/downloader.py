@@ -122,13 +122,9 @@ async def n_m3u8dl_re_download(
         "--select-subtitle", "all",   # Download all available subtitles
         "--header", f"Referer: {origin}/",
         "--header", f"Origin: {origin}",
-        "--header", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "--header", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "--select-video", "best"      # Always pick the highest quality stream
     ]
-
-    # We do not use --select-video because target_quality.url is already 
-    # the specific stream playlist extracted from the master playlist.
-    # N_m3u8DL-RE will automatically pick the best (and usually only) video stream.
-    
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
