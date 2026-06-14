@@ -8,6 +8,23 @@ from config.settings import settings
 from bot.app import create_app
 
 
+import asyncio
+from pyrogram import idle
+
+async def async_main():
+    app = create_app()
+    await app.start()
+    
+    if hasattr(app, "on_start") and callable(app.on_start):
+        await app.on_start(app)
+        
+    await idle()
+    
+    if hasattr(app, "on_stop") and callable(app.on_stop):
+        await app.on_stop(app)
+        
+    await app.stop()
+
 def main():
     logging.basicConfig(
         level=getattr(logging, settings.bot.log_level.upper(), logging.INFO),
@@ -19,8 +36,7 @@ def main():
     log.info("Starting AnimeDekho Bot (Pyrogram/MTProto)...")
 
     try:
-        app = create_app()
-        app.run()
+        asyncio.run(async_main())
     except KeyboardInterrupt:
         log.info("Shutting down...")
     except Exception as e:
