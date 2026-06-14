@@ -1,9 +1,8 @@
-"""Download manager — uses yt-dlp for streaming servers + Pyrogram MTProto for 2GB uploads."""
+"""Download manager — uses N_m3u8DL-RE for m3u8 streams + ffmpeg fallback + Pyrogram MTProto for 2GB uploads."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
@@ -24,6 +23,10 @@ TG_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024
 # Temp directory for downloads
 _TEMP_DIR = Path(tempfile.gettempdir()) / "animedekho_dl"
 _TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+# N_m3u8DL-RE tmp segments directory
+_SEGMENTS_DIR = _TEMP_DIR / "segments"
+_SEGMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def sanitize_filename(name: str) -> str:
@@ -65,103 +68,23 @@ async def _update_progress(msg: Message, text: str, last_edit: list[float]):
         pass
 
 
-# ── yt-dlp: List available qualities from a player URL ────────────────
+# ── N_m3u8DL-RE: Download m3u8/HLS streams ───────────────────────────
 
 
-async def ytdlp_get_qualities(player_url: str) -> list[Quality]:
-    """
-    Use yt-dlp to probe a streaming server URL and return available qualities.
-    Each Quality has a format_id that yt-dlp can use to download that specific format.
-    """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "yt-dlp", "--dump-json", "--no-download",
-            "--no-warnings", "--no-playlist",
-            player_url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-
-        if proc.returncode != 0:
-            log.debug("yt-dlp probe failed for %s: %s", player_url[:60], stderr.decode()[-200:])
-            return []
-
-        data = json.loads(stdout.decode())
-        formats = data.get("formats", [])
-
-        qualities = []
-        seen = set()
-        for f in formats:
-            height = f.get("height")
-            if not height or height in seen:
-                continue
-            seen.add(height)
-
-            fid = f.get("format_id", str(height))
-            tbr = int(f.get("tbr") or f.get("vbr") or 0)
-            res = f"{height}p"
-            label = res
-            if height >= 1080:
-                label = f"{res} (FHD)"
-            elif height >= 720:
-                label = f"{res} (HD)"
-            elif height <= 480:
-                label = f"{res} (SD)"
-
-            qualities.append(Quality(
-                resolution=res,
-                url=player_url,  # yt-dlp will handle the actual download
-                bandwidth=tbr * 1000,
-                label=label,
-            ))
-
-        # Sort by resolution descending
-        qualities.sort(key=lambda q: int(q.resolution.replace("p", "")), reverse=True)
-        return qualities
-
-    except asyncio.TimeoutError:
-        log.warning("yt-dlp probe timed out for %s", player_url[:60])
-        return []
-    except Exception as e:
-        log.warning("yt-dlp probe error for %s: %s", player_url[:60], e)
-        return []
-
-
-async def ytdlp_probe_servers(servers: list) -> tuple[list[Quality], str]:
-    """
-    Try yt-dlp on each server until one returns qualities.
-    Returns (qualities, working_player_url) or ([], "").
-    """
-    for srv in servers:
-        url = srv.player_url or srv.direct_url
-        if not url:
-            continue
-        log.info("Probing server %s with yt-dlp: %s", srv.name, url[:60])
-        qualities = await ytdlp_get_qualities(url)
-        if qualities:
-            log.info("yt-dlp found %d qualities on %s", len(qualities), srv.name)
-            return qualities, url
-    return [], ""
-
-
-# ── yt-dlp: Download with specific quality ────────────────────────────
-
-
-async def ytdlp_download(
-    player_url: str,
+async def n_m3u8dl_re_download(
+    stream_url: str,
     quality: str,
     output_path: str,
     progress_msg: Message | None = None,
     title: str = "video",
 ) -> bool:
     """
-    Download from a streaming server using yt-dlp.
-    
+    Download an m3u8/HLS stream using N_m3u8DL-RE.
+
     Args:
-        player_url: The streaming server embed/player URL
+        stream_url: The m3u8 stream URL (variant or master playlist)
         quality: Resolution like "720p", "1080p", "480p"
-        output_path: Where to save the file
+        output_path: Where to save the file (full path with .mp4 extension)
         title: For progress display
     """
     last_edit = [0.0]
@@ -170,36 +93,49 @@ async def ytdlp_download(
         await _update_progress(
             progress_msg,
             f"📥 <b>Downloading:</b> {title} [{quality}]\n"
-            f"{_progress_bar(0)}\n⏳ Starting yt-dlp...",
+            f"{_progress_bar(0)}\n⏳ Starting N_m3u8DL-RE...",
             [0],
         )
 
-    # Build format selector for yt-dlp
+    # Extract save name without extension
+    stem = Path(output_path).stem
+    save_dir = str(Path(output_path).parent)
+
+    # Build N_m3u8DL-RE command
+    cmd = [
+        "N_m3u8DL-RE",
+        stream_url,
+        "--save-dir", save_dir,
+        "--save-name", stem,
+        "--tmp-dir", str(_SEGMENTS_DIR),
+        "--del-after-done",           # Clean up segment temp files
+        "--no-log",                   # Don't create log file
+        "--log-level", "WARN",        # Minimal console output
+        "--thread-count", "16",       # Fast parallel download
+        "--download-retry-count", "5",  # Retry failed segments
+        "--binary-merge",             # Use binary merge (faster)
+        "--mux-after-done", "format=mp4",  # Mux to mp4 using ffmpeg
+    ]
+
+    # If it's a master playlist URL, select the specific quality
     height = quality.replace("p", "")
-    # Try exact height, then best available at or below
-    format_sel = f"bv*[height={height}]+ba/bv*[height<={height}]+ba/b[height<={height}]/b"
+    if height.isdigit():
+        cmd.extend(["--auto-select",])
+        # N_m3u8DL-RE supports selecting by resolution filter
+        cmd.extend(["--select-video", f"res=\"*x{height}\""])
 
     proc = await asyncio.create_subprocess_exec(
-        "yt-dlp",
-        "-f", format_sel,
-        "--merge-output-format", "mp4",
-        "--all-subs",              # All subtitles
-        "--embed-subs",            # Embed subtitles in file
-        "--audio-multistreams",    # All audio tracks
-        "--no-playlist",
-        "--no-warnings",
-        "--newline",               # Progress on new lines
-        "-o", output_path,
-        player_url,
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
 
     async def _monitor():
-        """Monitor yt-dlp stdout for progress updates."""
+        """Monitor download progress by checking file size."""
         start = time.time()
         while proc.returncode is None:
             await asyncio.sleep(3)
+            # Check for the output file (N_m3u8DL-RE may use .mp4)
             if os.path.exists(output_path):
                 size_mb = os.path.getsize(output_path) / (1024 * 1024)
                 elapsed = time.time() - start
@@ -212,8 +148,8 @@ async def ytdlp_download(
                         last_edit,
                     )
             else:
-                # Check for partial files
-                partials = list(_TEMP_DIR.glob(f"*{Path(output_path).stem}*"))
+                # Check for partial/temp files in save_dir
+                partials = list(Path(save_dir).glob(f"*{stem}*"))
                 if partials:
                     total_size = sum(p.stat().st_size for p in partials if p.exists())
                     size_mb = total_size / (1024 * 1024)
@@ -230,11 +166,11 @@ async def ytdlp_download(
     monitor_task = asyncio.create_task(_monitor())
 
     try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=900)  # 15 min timeout
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=900)  # 15 min timeout
     except asyncio.TimeoutError:
         proc.kill()
         monitor_task.cancel()
-        log.error("yt-dlp timed out for %s", player_url[:60])
+        log.error("N_m3u8DL-RE timed out for %s", stream_url[:60])
         return False
     finally:
         monitor_task.cancel()
@@ -244,23 +180,26 @@ async def ytdlp_download(
             pass
 
     if proc.returncode != 0:
-        log.error("yt-dlp failed (%d): %s", proc.returncode, stderr.decode()[-500:])
+        stderr_text = stderr.decode() if stderr else ""
+        stdout_text = stdout.decode() if stdout else ""
+        log.error("N_m3u8DL-RE failed (%d): %s %s", proc.returncode, stderr_text[-500:], stdout_text[-500:])
         return False
 
-    # yt-dlp may create file with different extension, find it
+    # N_m3u8DL-RE might create the file with the name directly
+    # or with a different extension before muxing. Find it.
     if not os.path.exists(output_path):
-        # Check for .mp4 or other variants
-        stem = Path(output_path).stem
-        for ext in [".mp4", ".mkv", ".webm"]:
-            alt = str(_TEMP_DIR / f"{stem}{ext}")
+        # Check for variants the muxer might create
+        for ext in [".mp4", ".mkv", ".ts"]:
+            alt = str(Path(save_dir) / f"{stem}{ext}")
             if os.path.exists(alt):
-                os.rename(alt, output_path)
+                if alt != output_path:
+                    os.rename(alt, output_path)
                 break
 
     return os.path.exists(output_path)
 
 
-# ── Fallback: ffmpeg direct m3u8 download ─────────────────────────────
+# ── Fallback: ffmpeg direct m3u8/mp4 download ────────────────────────
 
 
 async def download_m3u8(
@@ -269,7 +208,7 @@ async def download_m3u8(
     progress_msg: Message | None = None,
     title: str = "video",
 ) -> bool:
-    """Fallback: download m3u8 stream using ffmpeg directly."""
+    """Fallback: download m3u8/mp4 stream using ffmpeg directly."""
     last_edit = [0.0]
 
     if progress_msg:
@@ -339,7 +278,7 @@ async def download_m3u8(
 
 async def download_and_upload(
     chat_id: int,
-    player_url: str,
+    stream_url: str,
     quality: str,
     filename: str,
     title: str,
@@ -347,21 +286,46 @@ async def download_and_upload(
     client: Client,
 ) -> tuple[bool, Message | None]:
     """
-    Download a video using yt-dlp from a streaming server and upload via Pyrogram MTProto.
-    
+    Download a video using N_m3u8DL-RE (primary) or ffmpeg (fallback)
+    and upload via Pyrogram MTProto.
+
     Args:
-        player_url: The streaming server embed URL
+        stream_url: The m3u8/mp4 stream URL
         quality: Resolution string like "720p"
         filename: Output filename
         title: Display title
-    
+
     Returns (success, sent_message).
     """
     output_path = str(_TEMP_DIR / filename)
 
     try:
-        # Primary: download with yt-dlp
-        success = await ytdlp_download(player_url, quality, output_path, progress_msg, title)
+        success = False
+
+        # Determine if this is an m3u8 stream (use N_m3u8DL-RE) or mp4 (use ffmpeg)
+        is_m3u8 = ".m3u8" in stream_url.lower()
+
+        if is_m3u8:
+            # Primary: download m3u8 with N_m3u8DL-RE
+            success = await n_m3u8dl_re_download(
+                stream_url, quality, output_path, progress_msg, title
+            )
+
+            # Fallback to ffmpeg if N_m3u8DL-RE fails
+            if not success:
+                log.info("N_m3u8DL-RE failed, falling back to ffmpeg for %s", title)
+                if progress_msg:
+                    try:
+                        await progress_msg.edit_text(
+                            f"📥 <b>Retrying with ffmpeg:</b> {title} [{quality}]",
+                            parse_mode=enums.ParseMode.HTML,
+                        )
+                    except Exception:
+                        pass
+                success = await download_m3u8(stream_url, output_path, progress_msg, title)
+        else:
+            # Direct mp4 URL — use ffmpeg
+            success = await download_m3u8(stream_url, output_path, progress_msg, title)
 
         if not success:
             await progress_msg.edit_text(

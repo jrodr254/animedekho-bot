@@ -15,7 +15,7 @@ from bot.auth import require_approved
 from bot.logger import bot_logger
 from bot.downloader import (
     download_and_upload, make_episode_filename, make_movie_filename,
-    sanitize_filename, ytdlp_probe_servers, ytdlp_get_qualities,
+    sanitize_filename,
 )
 from utils.helpers import esc, truncate, short_slug, extract_series_slug, slug_to_title
 
@@ -631,9 +631,9 @@ async def _do_batch_download(client: Client, chat_id, series, season, episodes, 
 
 async def _do_download(client: Client, chat_id, quality, filename, title, progress_msg, user,
                        series_slug="", episode_key="", poster_url=None, is_movie=False):
-    """Background task for single download using yt-dlp."""
+    """Background task for single download using N_m3u8DL-RE."""
     try:
-        # quality.url is the player_url (set by ytdlp_get_qualities)
+        # quality.url is the direct m3u8/mp4 stream URL (from resolver)
         success, sent_msg = await download_and_upload(
             chat_id, quality.url, quality.resolution, filename, title, progress_msg, client
         )
@@ -733,27 +733,36 @@ def _sort_qualities(qualities: set[str]) -> list[str]:
 
 
 async def _populate_server_qualities(servers: list):
-    """Probe servers with yt-dlp then resolver fallback. Stops at first success."""
-    from extractors.resolver import resolve_player_url
+    """Extract stream URLs and qualities using the resolver.
     
-    for srv in servers:
+    Priority order: VidStream first, then HydraX, then Vidmoly.
+    Only falls back to next server if current server completely fails.
+    The resolver extracts real m3u8/mp4 URLs from player pages and
+    parses the m3u8 master playlist to get quality variants.
+    """
+    from extractors.resolver import resolve_player_url
+    from config.settings import settings
+
+    preferred = settings.site.preferred_servers  # ["VidStream", "HydraX", "Vidmoly"]
+
+    # Sort servers by priority: preferred servers first, in order
+    def _server_priority(srv):
+        name_lower = srv.name.lower()
+        for i, pref in enumerate(preferred):
+            if pref.lower() in name_lower:
+                return i
+        return len(preferred)  # Non-preferred servers go last
+
+    sorted_servers = sorted(servers, key=_server_priority)
+
+    for srv in sorted_servers:
         if srv.qualities:
-            return  # Already have qualities
+            return  # Already have qualities from a server
         url = srv.player_url or srv.direct_url
         if not url:
             continue
 
-        # Try yt-dlp first
-        try:
-            qualities = await ytdlp_get_qualities(url)
-            if qualities:
-                srv.qualities = qualities
-                log.info("yt-dlp found %d qualities on %s", len(qualities), srv.name)
-                return
-        except Exception as e:
-            log.debug("yt-dlp probe failed for %s: %s", srv.name, e)
-
-        # Fallback: try resolver
+        # Use resolver to extract stream URL and parse m3u8 qualities
         try:
             result = await resolve_player_url(url)
             if result:
@@ -772,7 +781,9 @@ async def _populate_server_qualities(servers: list):
                     )]
                     return
         except Exception as e:
-            log.debug("Resolver fallback failed for %s: %s", srv.name, e)
+            log.debug("Resolver failed for %s: %s", srv.name, e)
+
+        log.info("Server %s failed, trying next in priority order...", srv.name)
 
 
 def _pick_quality(srv, quality_idx: int):
@@ -787,41 +798,59 @@ def _pick_quality(srv, quality_idx: int):
 
 
 def _find_quality_match(servers: list, quality_pref: str) -> Quality | None:
-    """Find the best quality matching preference across all servers."""
-    all_qualities = []
-    for srv in servers:
-        all_qualities.extend(srv.qualities)
+    """Find the best quality matching preference across servers.
+    
+    Server priority: VidStream → HydraX → Vidmoly.
+    Only checks next server if current has no matching quality.
+    """
+    from config.settings import settings
+    preferred = settings.site.preferred_servers  # ["VidStream", "HydraX", "Vidmoly"]
 
-    if not all_qualities:
-        # Fallback to direct URLs
-        for srv in servers:
-            if srv.direct_url:
-                return Quality(resolution="auto", url=srv.direct_url)
-        return None
+    # Sort servers by priority
+    def _server_priority(srv):
+        name_lower = srv.name.lower()
+        for i, pref in enumerate(preferred):
+            if pref.lower() in name_lower:
+                return i
+        return len(preferred)
 
-    if quality_pref == "auto":
-        return all_qualities[0]  # Highest quality (sorted by bandwidth desc)
+    sorted_servers = sorted(servers, key=_server_priority)
 
-    # Try exact match
-    for q in all_qualities:
-        if q.resolution == quality_pref:
-            return q
-
-    # Try closest match
-    pref_height = int(quality_pref.replace("p", "")) if quality_pref.endswith("p") else 0
-    best = None
-    best_diff = float("inf")
-    for q in all_qualities:
-        try:
-            h = int(q.resolution.replace("p", ""))
-            diff = abs(h - pref_height)
-            if diff < best_diff:
-                best_diff = diff
-                best = q
-        except ValueError:
+    # Try each server in priority order
+    for srv in sorted_servers:
+        if not srv.qualities:
             continue
 
-    return best or all_qualities[0]
+        if quality_pref == "auto":
+            return srv.qualities[0]  # Highest quality
+
+        # Try exact match on this server
+        for q in srv.qualities:
+            if q.resolution == quality_pref:
+                return q
+
+        # Try closest match on this server
+        pref_height = int(quality_pref.replace("p", "")) if quality_pref.endswith("p") else 0
+        best = None
+        best_diff = float("inf")
+        for q in srv.qualities:
+            try:
+                h = int(q.resolution.replace("p", ""))
+                diff = abs(h - pref_height)
+                if diff < best_diff:
+                    best_diff = diff
+                    best = q
+            except ValueError:
+                continue
+
+        if best:
+            return best
+
+    # Last resort: any direct URL
+    for srv in sorted_servers:
+        if srv.direct_url:
+            return Quality(resolution="auto", url=srv.direct_url)
+    return None
 
 
 # ── Server data cache (in-memory, per chat) ──────────────────────────

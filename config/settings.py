@@ -22,13 +22,17 @@ class SiteConfig:
     # Known trdekho server IDs
     server_ids: dict = field(default_factory=lambda: {
         0: "VidStream",
-        1: "Server 2",
-        2: "Server 3",
+        1: "HydraX",
+        2: "Vidmoly",
         3: "Server 4",
         4: "Server 5",
         6: "Server 6",
         8: "Server 7",
     })
+    # Server priority order: VidStream first, HydraX fallback, Vidmoly last resort
+    preferred_servers: list = field(default_factory=lambda: ["VidStream", "HydraX", "Vidmoly"])
+    # Default quality buttons always shown to user
+    default_qualities: list = field(default_factory=lambda: ["480p", "720p", "1080p"])
 
 
 @dataclass(frozen=True)

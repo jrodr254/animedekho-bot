@@ -13,8 +13,6 @@ RUN curl -L -o /usr/local/bin/N_m3u8DL-RE \
     "https://github.com/nilaoda/N_m3u8DL-RE/releases/latest/download/N_m3u8DL-RE_Beta_linux-x64" && \
     chmod +x /usr/local/bin/N_m3u8DL-RE
 
-# Install yt-dlp
-RUN pip install --no-cache-dir yt-dlp
 
 # Set working directory
 WORKDIR /app

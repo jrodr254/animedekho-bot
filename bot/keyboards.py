@@ -126,10 +126,10 @@ def episode_picker(
 
 
 def batch_quality_picker(series_slug: str, season: int) -> InlineKeyboardMarkup:
-    """Quality selection for batch download."""
+    """Quality selection for batch download — uses default 3 qualities."""
     buttons = []
     ss = short_slug(series_slug, 28)
-    for q in ["360p", "480p", "720p", "1080p", "auto"]:
+    for q in settings.site.default_qualities:  # ["480p", "720p", "1080p"]
         cb = _safe_cb(f"bq:{ss}:{season}:{q}")
         buttons.append([InlineKeyboardButton(f"📥 {q}", callback_data=cb)])
     buttons.append([
@@ -145,34 +145,27 @@ def quality_picker(
     back_cb: str,
     is_movie: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Show quality-only download buttons. No server names."""
+    """Show 3 default quality buttons (480p, 720p, 1080p). Server selection is automatic."""
     buttons = []
     prefix = "mdl" if is_movie else "dl"
     ss = short_slug(slug, 48)
 
-    sorted_q = sorted(
-        qualities,
-        key=lambda q: {"360p": 1, "480p": 2, "720p": 3, "1080p": 4, "auto": 5}.get(q, 99),
-    )
-
-    # If no qualities found, add auto download button
-    if not sorted_q:
-        sorted_q = ["auto"]
+    # Always show the 3 default quality buttons regardless of what was detected
+    default_q = settings.site.default_qualities  # ["480p", "720p", "1080p"]
 
     row: list[InlineKeyboardButton] = []
-    for q in sorted_q:
+    for q in default_q:
         cb = _safe_cb(f"{prefix}:{q}:{ss}")
-        label = f"📥 {q}"
         if q == "1080p":
             label = "📥 1080p (FHD)"
         elif q == "720p":
             label = "📥 720p (HD)"
         elif q == "480p":
             label = "📥 480p (SD)"
-        elif q == "auto":
-            label = "📥 Download (Auto)"
+        else:
+            label = f"📥 {q}"
         row.append(InlineKeyboardButton(label, callback_data=cb))
-        if len(row) >= 2:
+        if len(row) >= 3:
             buttons.append(row)
             row = []
     if row:

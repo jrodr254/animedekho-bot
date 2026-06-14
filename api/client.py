@@ -185,11 +185,32 @@ class AnimeDekhoAPI:
         return server
 
     async def resolve_all_servers(self, servers: list[VideoServer]) -> list[VideoServer]:
-        """Resolve all servers, return only available ones."""
+        """Resolve all servers, return only available ones.
+        
+        Servers are sorted by priority (VidStream → HydraX → Vidmoly)
+        so the preferred server appears first in the result list.
+        """
         import asyncio
-        tasks = [self.resolve_server(s) for s in servers]
+        from config.settings import settings
+        preferred = settings.site.preferred_servers  # ["VidStream", "HydraX", "Vidmoly"]
+
+        def _server_priority(srv):
+            name_lower = srv.name.lower()
+            for i, pref in enumerate(preferred):
+                if pref.lower() in name_lower:
+                    return i
+            return len(preferred)
+
+        # Sort by priority before resolving
+        sorted_servers = sorted(servers, key=_server_priority)
+
+        tasks = [self.resolve_server(s) for s in sorted_servers]
         resolved = await asyncio.gather(*tasks, return_exceptions=True)
-        return [s for s in resolved if isinstance(s, VideoServer) and s.is_available]
+        available = [s for s in resolved if isinstance(s, VideoServer) and s.is_available]
+
+        # Re-sort available servers by priority (gather preserves order, but be safe)
+        available.sort(key=_server_priority)
+        return available
 
     # ── Categories ────────────────────────────────────────────────
 
