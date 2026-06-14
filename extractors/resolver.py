@@ -109,6 +109,10 @@ def parse_m3u8_qualities(m3u8_content: str, base_url: str) -> list[Quality]:
         if res_match:
             height = int(res_match.group(2))
             resolution = f"{height}p"
+            
+        name_match = re.search(r'NAME="([^"]+)"', line)
+        if name_match and not resolution:
+            resolution = name_match.group(1).lower()
 
         # Next non-empty, non-comment line is the URL
         url = ""
@@ -126,12 +130,12 @@ def parse_m3u8_qualities(m3u8_content: str, base_url: str) -> list[Quality]:
             url = urljoin(base_url, url)
 
         if not resolution:
-            # Try to infer from bandwidth
-            if bandwidth > 4_000_000:
+            # Try to infer from bandwidth (anime encodes are highly compressed)
+            if bandwidth > 2_500_000:
                 resolution = "1080p"
-            elif bandwidth > 2_000_000:
-                resolution = "720p"
             elif bandwidth > 1_000_000:
+                resolution = "720p"
+            elif bandwidth > 500_000:
                 resolution = "480p"
             else:
                 resolution = "360p"
