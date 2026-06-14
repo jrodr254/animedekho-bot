@@ -733,21 +733,46 @@ def _sort_qualities(qualities: set[str]) -> list[str]:
 
 
 async def _populate_server_qualities(servers: list):
-    """Probe servers with yt-dlp to find available qualities. Stops at first working server."""
+    """Probe servers with yt-dlp then resolver fallback. Stops at first success."""
+    from extractors.resolver import resolve_player_url
+    
     for srv in servers:
         if srv.qualities:
-            continue
+            return  # Already have qualities
         url = srv.player_url or srv.direct_url
         if not url:
             continue
+
+        # Try yt-dlp first
         try:
             qualities = await ytdlp_get_qualities(url)
             if qualities:
                 srv.qualities = qualities
                 log.info("yt-dlp found %d qualities on %s", len(qualities), srv.name)
-                return  # Found a working server, no need to probe more
+                return
         except Exception as e:
             log.debug("yt-dlp probe failed for %s: %s", srv.name, e)
+
+        # Fallback: try resolver
+        try:
+            result = await resolve_player_url(url)
+            if result:
+                if result.get("qualities"):
+                    srv.qualities = result["qualities"]
+                    log.info("Resolver found %d qualities on %s", len(srv.qualities), srv.name)
+                    return
+                elif result.get("url"):
+                    vtype = result.get("type", "mp4")
+                    srv.direct_url = result["url"]
+                    srv.video_type = vtype
+                    srv.qualities = [Quality(
+                        resolution="auto",
+                        url=result["url"],
+                        label=f"Auto ({vtype.upper()})"
+                    )]
+                    return
+        except Exception as e:
+            log.debug("Resolver fallback failed for %s: %s", srv.name, e)
 
 
 def _pick_quality(srv, quality_idx: int):
