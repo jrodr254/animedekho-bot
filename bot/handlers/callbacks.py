@@ -845,6 +845,9 @@ def _find_quality_match(servers: list, quality_pref: str) -> Quality | None:
 
         if best:
             return best
+        elif srv.qualities:
+            # If we couldn't match numerically (e.g., "auto"), just return the best quality on this preferred server
+            return srv.qualities[0]
 
     # Last resort: any direct URL
     for srv in sorted_servers:
