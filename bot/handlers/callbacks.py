@@ -12,7 +12,7 @@ from api.client import api
 from api.models import Quality
 from bot import keyboards as kb
 from bot.auth import require_approved
-from bot.logger import bot_logger
+import bot.logger
 from bot.downloader import (
     download_and_upload, make_episode_filename, make_movie_filename,
     sanitize_filename,
@@ -92,8 +92,8 @@ async def callback_router(client: Client, query: CallbackQuery):
 
     except Exception as e:
         log.exception("Callback error for %s", data)
-        if bot_logger:
-            await bot_logger.log_error(f"callback:{data}", str(e))
+        if bot.logger.bot_logger:
+            await bot.logger.bot_logger.log_error(f"callback:{data}", str(e))
         await _safe_edit(query, f"⚠️ Error: {esc(str(e)[:200])}\n\nTry /start")
 
 
@@ -160,9 +160,9 @@ async def _handle_movie_detail(client: Client, q: CallbackQuery, slug: str):
     await _populate_server_qualities(resolved)
 
     # Log resolution
-    if bot_logger:
+    if bot.logger.bot_logger:
         for srv in movie.servers:
-            await bot_logger.log_server_resolve(movie.title, srv.name, srv.is_available)
+            await bot.logger.bot_logger.log_server_resolve(movie.title, srv.name, srv.is_available)
 
     # Collect all unique qualities across ALL servers
     all_qualities: set[str] = set()
@@ -246,9 +246,9 @@ async def _handle_episode(q: CallbackQuery, ep_slug: str):
             all_qualities.add("auto")
 
     # Log
-    if bot_logger:
+    if bot.logger.bot_logger:
         for srv in resolved:
-            await bot_logger.log_server_resolve(
+            await bot.logger.bot_logger.log_server_resolve(
                 episode.title or ep_slug, srv.name, srv.is_available
             )
 
@@ -262,8 +262,8 @@ async def _handle_episode(q: CallbackQuery, ep_slug: str):
         text += "📥 Tap download to start:"
     else:
         text += "⚠️ Could not extract servers. Use 'Watch on Site'.\n"
-        if bot_logger:
-            await bot_logger.log_error("episode_resolve", f"No servers for {ep_slug}")
+        if bot.logger.bot_logger:
+            await bot.logger.bot_logger.log_error("episode_resolve", f"No servers for {ep_slug}")
 
     series_slug = extract_series_slug(ep_slug)
     back_cb = f"sr:{short_slug(series_slug)}" if series_slug else "rp:1"
@@ -341,8 +341,8 @@ async def _handle_download(client: Client, q: CallbackQuery, quality_pref: str, 
     poster_url = None
 
     # Log
-    if bot_logger:
-        await bot_logger.log_download_start(
+    if bot.logger.bot_logger:
+        await bot.logger.bot_logger.log_download_start(
             user.id, user.username or str(user.id), title, quality.resolution
         )
 
@@ -408,8 +408,8 @@ async def _handle_movie_download(client: Client, q: CallbackQuery, quality_pref:
             except Exception as e:
                 log.warning("Cached movie file send failed, will re-download: %s", e)
 
-    if bot_logger:
-        await bot_logger.log_download_start(
+    if bot.logger.bot_logger:
+        await bot.logger.bot_logger.log_download_start(
             user.id, user.username or str(user.id), title, quality.resolution
         )
 
@@ -453,8 +453,8 @@ async def _handle_batch_download(client: Client, q: CallbackQuery, slug: str, se
 
     total = len(s.episodes)
 
-    if bot_logger:
-        await bot_logger.log_batch_start(
+    if bot.logger.bot_logger:
+        await bot.logger.bot_logger.log_batch_start(
             user.id, user.username or str(user.id),
             series.title, season, total
         )
@@ -543,8 +543,8 @@ async def _do_batch_download(client: Client, chat_id, series, season, episodes, 
 
             if success:
                 completed += 1
-                if bot_logger:
-                    await bot_logger.log_download_complete(
+                if bot.logger.bot_logger:
+                    await bot.logger.bot_logger.log_download_complete(
                         f"{series.title} S{season}E{ep.number}",
                         quality.resolution, 0
                     )
@@ -598,16 +598,16 @@ async def _do_batch_download(client: Client, chat_id, series, season, episodes, 
                             except Exception:
                                 pass
             else:
-                if bot_logger:
-                    await bot_logger.log_download_error(
+                if bot.logger.bot_logger:
+                    await bot.logger.bot_logger.log_download_error(
                         f"{series.title} S{season}E{ep.number}",
                         "Download/upload failed"
                     )
 
         except Exception as e:
             log.exception("Batch download error for ep %s", ep.slug)
-            if bot_logger:
-                await bot_logger.log_download_error(
+            if bot.logger.bot_logger:
+                await bot.logger.bot_logger.log_download_error(
                     f"{series.title} S{season}E{ep.number}", str(e)
                 )
 
@@ -625,8 +625,8 @@ async def _do_batch_download(client: Client, chat_id, series, season, episodes, 
     except Exception:
         pass
 
-    if bot_logger:
-        await bot_logger.log_batch_complete(series.title, season, completed, total)
+    if bot.logger.bot_logger:
+        await bot.logger.bot_logger.log_batch_complete(series.title, season, completed, total)
 
 
 async def _do_download(client: Client, chat_id, quality, filename, title, progress_msg, user,
@@ -637,8 +637,8 @@ async def _do_download(client: Client, chat_id, quality, filename, title, progre
         success, sent_msg = await download_and_upload(
             chat_id, quality.url, quality.resolution, filename, title, progress_msg, client
         )
-        if success and bot_logger:
-            await bot_logger.log_download_complete(title, quality.resolution, 0)
+        if success and bot.logger.bot_logger:
+            await bot.logger.bot_logger.log_download_complete(title, quality.resolution, 0)
 
         # Save to library if upload succeeded
         if success and sent_msg and series_slug:
@@ -690,12 +690,12 @@ async def _do_download(client: Client, chat_id, quality, filename, title, progre
                     except Exception:
                         pass
 
-        elif not success and bot_logger:
-            await bot_logger.log_download_error(title, "Download/upload failed")
+        elif not success and bot.logger.bot_logger:
+            await bot.logger.bot_logger.log_download_error(title, "Download/upload failed")
     except Exception as e:
         log.exception("Download task error for %s", title)
-        if bot_logger:
-            await bot_logger.log_download_error(title, str(e))
+        if bot.logger.bot_logger:
+            await bot.logger.bot_logger.log_download_error(title, str(e))
         try:
             await progress_msg.edit_text(
                 f"❌ <b>Error:</b> {esc(title)}\n{esc(str(e)[:200])}",

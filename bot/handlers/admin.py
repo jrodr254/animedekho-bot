@@ -4,7 +4,7 @@ from pyrogram import Client, enums
 from pyrogram.types import Message
 
 from bot.auth import require_owner, add_user, remove_user, get_users, is_owner
-from bot.logger import bot_logger
+import bot.logger
 
 
 def _parse_args(message: Message) -> list[str]:
@@ -25,8 +25,8 @@ async def cmd_adduser(client: Client, message: Message):
         return
     if await add_user(uid, added_by=message.from_user.id):
         await message.reply_text(f"✅ User <code>{uid}</code> added.", parse_mode=enums.ParseMode.HTML)
-        if bot_logger:
-            await bot_logger.log_user_added(uid)
+        if bot.logger.bot_logger:
+            await bot.logger.bot_logger.log_user_added(uid)
     else:
         await message.reply_text("ℹ️ User already approved.")
 
@@ -43,8 +43,8 @@ async def cmd_removeuser(client: Client, message: Message):
         return
     if await remove_user(uid):
         await message.reply_text(f"✅ User <code>{uid}</code> removed.", parse_mode=enums.ParseMode.HTML)
-        if bot_logger:
-            await bot_logger.log_user_removed(uid)
+        if bot.logger.bot_logger:
+            await bot.logger.bot_logger.log_user_removed(uid)
     else:
         await message.reply_text("ℹ️ User not in the approved list.")
 
@@ -69,10 +69,10 @@ async def cmd_setlogchannel(client: Client, message: Message):
         await message.reply_text("Usage: /setlogchannel <channel_id>\n\nTip: forward a message from the channel to @userinfobot to get the ID.")
         return
     cid = int(args[0])
-    if bot_logger:
-        bot_logger.set_log_channel(cid)
+    if bot.logger.bot_logger:
+        bot.logger.bot_logger.set_log_channel(cid)
         await message.reply_text(f"✅ Log channel set to <code>{cid}</code>", parse_mode=enums.ParseMode.HTML)
-        await bot_logger._send_log("🔗 Log channel connected!")
+        await bot.logger.bot_logger._send_log("🔗 Log channel connected!")
     else:
         await message.reply_text("⚠️ Logger not initialized yet.")
 
@@ -84,10 +84,13 @@ async def cmd_setmainchannel(client: Client, message: Message):
         await message.reply_text("Usage: /setmainchannel <channel_id>")
         return
     cid = int(args[0])
-    if bot_logger:
-        bot_logger.set_main_channel(cid)
+    if bot.logger.bot_logger:
+        bot.logger.bot_logger.set_main_channel(cid)
+        import bot.library
+        if bot.library.library_manager:
+            bot.library.library_manager.channel = cid
         await message.reply_text(f"✅ Main channel set to <code>{cid}</code>", parse_mode=enums.ParseMode.HTML)
-        await bot_logger._send_main("🔗 Main channel connected!")
+        await bot.logger.bot_logger._send_main("🔗 Main channel connected!")
     else:
         await message.reply_text("⚠️ Logger not initialized yet.")
 

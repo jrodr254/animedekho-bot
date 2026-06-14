@@ -8,7 +8,7 @@ from pyrogram.types import Message
 
 from bot.keyboards import main_menu
 from bot.auth import require_approved
-from bot.logger import bot_logger
+import bot.logger
 
 log = logging.getLogger(__name__)
 
@@ -23,8 +23,8 @@ async def cmd_start(client: Client, message: Message):
         await _handle_file_request(client, message, args[1])
         return
 
-    if bot_logger:
-        await bot_logger.log_bot_start(user.id, user.username or user.first_name)
+    if bot.logger.bot_logger:
+        await bot.logger.bot_logger.log_bot_start(user.id, user.username or user.first_name)
 
     await message.reply_text(
         "🎌 <b>AnimeDekho Bot</b>\n\n"

@@ -8,7 +8,7 @@ from pyrogram.types import Message
 from api.client import api
 from bot.keyboards import search_results
 from bot.auth import require_approved
-from bot.logger import bot_logger
+import bot.logger
 from utils.helpers import esc
 
 log = logging.getLogger(__name__)
@@ -24,8 +24,8 @@ async def handle_text(client: Client, message: Message):
     msg = await message.reply_text("🔍 Searching...")
 
     # Log the search
-    if bot_logger:
-        await bot_logger.log_search(user.id, user.username or user.first_name, query)
+    if bot.logger.bot_logger:
+        await bot.logger.bot_logger.log_search(user.id, user.username or user.first_name, query)
 
     try:
         results = await api.search(query)
@@ -41,5 +41,5 @@ async def handle_text(client: Client, message: Message):
     except Exception as e:
         log.exception("Search failed")
         await msg.edit_text(f"⚠️ Search error: {esc(str(e)[:150])}")
-        if bot_logger:
-            await bot_logger.log_error("search", str(e))
+        if bot.logger.bot_logger:
+            await bot.logger.bot_logger.log_error("search", str(e))
