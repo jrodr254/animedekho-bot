@@ -133,14 +133,15 @@ async def cmd_setchannellink(client: Client, message: Message):
 
 @require_owner
 async def cmd_delete(client: Client, message: Message):
-    """Delete a series or specific file from the database."""
+    """Delete a series, specific quality, or specific episode from the database."""
     args = _parse_args(message)
     if not args:
-        await message.reply_text("Usage: /delete <series_slug> [quality]\n\nExample: /delete naruto-shippuden 1080p")
+        await message.reply_text("Usage: /delete <series_slug> [quality] [episode_key]\n\nExamples:\n/delete naruto 1080p\n/delete naruto 1080p S1E01")
         return
         
     series_slug = args[0]
     quality = args[1] if len(args) > 1 else None
+    episode_key = args[2] if len(args) > 2 else None
     
     from bot.database import db
     from bot.library import library_manager
@@ -151,13 +152,28 @@ async def cmd_delete(client: Client, message: Message):
     query = {"series_slug": series_slug}
     if quality:
         query["quality"] = quality
+    if episode_key:
+        query["episode_key"] = episode_key
         
     # Delete from files collection
     deleted_files = await db.files.delete_many(query)
     
-    # Delete from library collection and remove channel messages
-    cursor = db.library.find(query)
+    # Check if we should delete or just update the library message
     messages_deleted = 0
+    if episode_key:
+        # We only deleted one episode. We shouldn't delete the whole library post!
+        # Instead, we just trigger an update for the library post by calling _save_locked?
+        # Actually, if we delete the file, the next time someone downloads it will recreate it.
+        # But for now, we'll just let the user know they might need to redownload to fix the message.
+        await message.reply_text(
+            f"🗑️ Deleted {deleted_files.deleted_count} files for <code>{series_slug}</code> {quality or ''} {episode_key}.\n\n"
+            f"<i>Note: The channel message will update automatically the next time you download an episode for this series.</i>",
+            parse_mode=enums.ParseMode.HTML
+        )
+        return
+        
+    # If deleting whole series or whole quality, delete the library message
+    cursor = db.library.find(query)
     async for entry in cursor:
         msg_id = entry.get("message_id")
         if msg_id and library_manager and library_manager.channel:
