@@ -72,8 +72,8 @@ async def _handle_file_request(client: Client, message: Message, param: str):
     # Parse: get_<slug>_<quality>_<ep_key>
     raw = param[4:]  # strip "get_"
 
-    # Try to match episode key at the end (S\d+E\d+ or "movie")
-    m = re.match(r"^(.+)_(\d+p|auto)_(S\d+E\d+|movie)$", raw, re.IGNORECASE)
+    # Try to match episode key at the end (S\d+E\d+|movie|all)
+    m = re.match(r"^(.+)_(\d+p|auto)_(S\d+E\d+|movie|all)$", raw, re.IGNORECASE)
     if not m:
         await message.reply_text("⚠️ Invalid file link format.")
         return
@@ -82,19 +82,47 @@ async def _handle_file_request(client: Client, message: Message, param: str):
     quality = m.group(2)
     episode_key = m.group(3)
 
-    # Look up file
+    import html as htmlmod
+    from utils.helpers import slug_to_title
+    title = slug_to_title(series_slug)
+
+    # Handle fetching ALL episodes
+    if episode_key.lower() == "all":
+        # Fetch all files for this series and quality
+        cursor = db.files.find({"series_slug": series_slug, "quality": quality})
+        all_files = await cursor.to_list(length=None)
+        
+        if not all_files:
+            await message.reply_text("❌ No files found for this series.")
+            return
+            
+        from bot.library import _ep_sort_key
+        all_files.sort(key=lambda x: _ep_sort_key(x["episode_key"]))
+        
+        status_msg = await message.reply_text(f"📤 Sending {len(all_files)} episodes...")
+        for f in all_files:
+            ep_key = f["episode_key"]
+            file_id = f["file_id"]
+            caption = f"📺 {htmlmod.escape(title)} [{quality}] — {ep_key}"
+            try:
+                await message.reply_video(video=file_id, caption=caption, parse_mode=enums.ParseMode.HTML)
+            except Exception:
+                try:
+                    await message.reply_document(document=file_id, caption=caption, parse_mode=enums.ParseMode.HTML)
+                except Exception as e:
+                    log.error("Failed to send %s: %s", ep_key, e)
+        
+        await status_msg.delete()
+        return
+
+    # Normal single-file logic
     file_id = await library_manager.get_file(series_slug, quality, episode_key)
     if not file_id:
-        await message.reply_text(
-            "❌ File not found in library. It may have been removed or not yet uploaded."
-        )
+        await message.reply_text("❌ File not found in library.")
         return
 
     # Send the file
     try:
-        import html as htmlmod
-        from utils.helpers import slug_to_title
-        title = slug_to_title(series_slug)
         caption = f"📺 {htmlmod.escape(title)} [{quality}]"
         if episode_key.lower() != "movie":
             caption += f" — {episode_key}"
@@ -126,6 +154,4 @@ async def _handle_file_request(client: Client, message: Message, param: str):
             )
         except Exception as e2:
             log.error("Document fallback also failed: %s", e2)
-            await message.reply_text(
-                "❌ Could not send file. It may have expired from Telegram servers."
-            )
+            await message.reply_text("❌ Could not send file.")

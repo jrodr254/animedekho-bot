@@ -94,83 +94,122 @@ class LibraryManager:
             upsert=True,
         )
 
-        # Create a new message for every single episode/file
-        new_entry = {
-            "series_slug": series_slug,
-            "series_title": series_title,
-            "quality": quality,
-            "poster_url": poster_url,
-            "episode_key": episode_key,
-            "file_id": file_id,
-            "is_movie": is_movie,
-            "message_id": None,
-            "updated_at": now,
-        }
-        msg_id = await self._create_library_message(new_entry)
-        new_entry["message_id"] = msg_id
-        await self.db.library.insert_one(new_entry)
+        # Get all downloaded episodes for this series and quality
+        cursor = self.db.files.find({"series_slug": series_slug, "quality": quality})
+        all_files = await cursor.to_list(length=None)
+        all_files.sort(key=lambda x: _ep_sort_key(x["episode_key"]))
 
-    async def _create_library_message(self, entry: dict) -> int | None:
-        """Send new message to main channel with poster and inline button."""
-        caption = self._format_caption(entry)
-        
-        # Build the inline keyboard button for download
-        slug = entry["series_slug"]
-        quality = entry["quality"]
-        ep_key = entry["episode_key"]
-        
-        deep = f"https://t.me/{self.bot_username}?start=get_{slug}_{quality}_{ep_key}"
+        entry = await self.db.library.find_one(
+            {"series_slug": series_slug, "quality": quality}
+        )
+
+        # Build message components
+        caption = self._format_caption(series_title, all_files, quality, poster_url)
+        deep = f"https://t.me/{self.bot_username}?start=get_{series_slug}_{quality}_all"
         
         from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(quality, url=deep)]
-        ])
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(quality, url=deep)]])
 
-        try:
-            poster = entry.get("poster_url")
-            if poster:
-                msg = await self.client.send_photo(
-                    chat_id=self.channel,
-                    photo=poster,
-                    caption=caption[:CAPTION_LIMIT],
-                    parse_mode=enums.ParseMode.HTML,
-                    reply_markup=markup,
+        if entry and entry.get("message_id"):
+            # Update existing message
+            msg_id = entry["message_id"]
+            try:
+                if poster_url:
+                    await self.client.edit_message_caption(
+                        chat_id=self.channel,
+                        message_id=msg_id,
+                        caption=caption[:CAPTION_LIMIT],
+                        parse_mode=enums.ParseMode.HTML,
+                        reply_markup=markup,
+                    )
+                else:
+                    await self.client.edit_message_text(
+                        chat_id=self.channel,
+                        message_id=msg_id,
+                        text=caption[:CAPTION_LIMIT],
+                        parse_mode=enums.ParseMode.HTML,
+                        disable_web_page_preview=True,
+                        reply_markup=markup,
+                    )
+                # Update DB
+                await self.db.library.update_one(
+                    {"_id": entry["_id"]},
+                    {"$set": {"updated_at": now, "poster_url": poster_url}}
                 )
-            else:
-                msg = await self.client.send_message(
-                    chat_id=self.channel,
-                    text=caption,
-                    parse_mode=enums.ParseMode.HTML,
-                    disable_web_page_preview=True,
-                    reply_markup=markup,
-                )
-            log.info("Created library message %d for %s [%s]",
-                     msg.id, entry["series_slug"], entry["quality"])
-            return msg.id
-        except Exception as e:
-            log.error("Failed to create library message: %s", e)
-            return None
+            except Exception as e:
+                log.error("Failed to update library message %d: %s", msg_id, e)
+        else:
+            # Create new message
+            try:
+                if poster_url:
+                    msg = await self.client.send_photo(
+                        chat_id=self.channel,
+                        photo=poster_url,
+                        caption=caption[:CAPTION_LIMIT],
+                        parse_mode=enums.ParseMode.HTML,
+                        reply_markup=markup,
+                    )
+                else:
+                    msg = await self.client.send_message(
+                        chat_id=self.channel,
+                        text=caption[:CAPTION_LIMIT],
+                        parse_mode=enums.ParseMode.HTML,
+                        disable_web_page_preview=True,
+                        reply_markup=markup,
+                    )
+                # Save to library
+                new_entry = {
+                    "series_slug": series_slug,
+                    "series_title": series_title,
+                    "quality": quality,
+                    "poster_url": poster_url,
+                    "message_id": msg.id,
+                    "updated_at": now,
+                }
+                await self.db.library.insert_one(new_entry)
+            except Exception as e:
+                log.error("Failed to create library message: %s", e)
 
-    def _format_caption(self, entry: dict) -> str:
-        """
-        Format the caption for a library message exactly like the reference image.
-        """
+    def _format_caption(self, title: str, all_files: list, quality: str, poster_url: str | None) -> str:
+        """Format the caption for a grouped library message."""
         import html as htmlmod
         import re
-        title = htmlmod.escape(entry.get("series_title", entry["series_slug"]))
-        quality = entry.get("quality", "auto")
-        ep_key = entry.get("episode_key", "")
         
-        # Parse season and episode from ep_key (e.g. S1E01)
+        title_esc = htmlmod.escape(title)
+        
+        # Analyze episodes to format "1 - 5" or "1, 2, 3"
+        ep_numbers = []
         season = 1
-        episode = 1
-        m = re.match(r"S(\d+)E(\d+)", ep_key, re.IGNORECASE)
-        if m:
-            season = int(m.group(1))
-            episode = int(m.group(2))
-            
-        # Hardcode some defaults that look like the user's request
-        # Since we don't have full metadata in the bot downloader context
+        is_movie = False
+        
+        for f in all_files:
+            k = f["episode_key"]
+            if k.lower() == "movie":
+                is_movie = True
+            else:
+                m = re.match(r"S(\d+)E(\d+)", k, re.IGNORECASE)
+                if m:
+                    season = int(m.group(1))
+                    ep_numbers.append(int(m.group(2)))
+                    
+        ep_numbers = sorted(list(set(ep_numbers)))
+        
+        if is_movie:
+            episode_str = "Movie"
+        elif not ep_numbers:
+            episode_str = "0"
+        elif len(ep_numbers) == 1:
+            episode_str = str(ep_numbers[0])
+        else:
+            # If sequential, show range
+            if ep_numbers[-1] - ep_numbers[0] == len(ep_numbers) - 1:
+                episode_str = f"{ep_numbers[0]} - {ep_numbers[-1]}"
+            else:
+                # Comma separated
+                episode_str = ", ".join(str(x) for x in ep_numbers[:10])
+                if len(ep_numbers) > 10:
+                    episode_str += "..."
+
         status = "FINISHED"
         genres = "Action, Adventure, Comedy, Drama, Fantasy"
         audio = "Dual Audio" if "Dual" in title or "Hindi" in title else "Japanese"
@@ -178,10 +217,10 @@ class LibraryManager:
             audio = "Dual Audio"
             
         caption = (
-            f"◆ {title} ◆ ❞\n"
+            f"◆ {title_esc} ◆ ❞\n"
             f"⟐━━━━━━━━━━━━━━━━━⟐\n"
             f"➥ Sᴇᴀsᴏɴ:- {season}\n"
-            f"➥ Eᴘɪsᴏᴅᴇ:- {episode}\n"
+            f"➥ Eᴘɪsᴏᴅᴇ:- {episode_str}\n"
             f"➥ Sᴛᴀᴛᴜs:- {status}\n"
             f"➥ Gᴇɴʀᴇs:- {genres}\n"
             f"➥ Aᴜᴅɪᴏ:- {audio}\n"
