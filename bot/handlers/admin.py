@@ -185,6 +185,15 @@ async def cmd_delete(client: Client, message: Message):
         
     await db.library.delete_many(query)
     
+    if deleted_files.deleted_count == 0:
+        await message.reply_text(
+            f"⚠️ No files found for <code>{series_slug}</code>.\n\n"
+            f"<b>Important:</b> Make sure you are using the exact URL slug with hyphens, not the title!\n"
+            f"For example: use <code>yowayowa-sensei</code> instead of <code>Yowayowa Sensei</code>.",
+            parse_mode=enums.ParseMode.HTML
+        )
+        return
+        
     await message.reply_text(
         f"🗑️ Deleted {deleted_files.deleted_count} files and {messages_deleted} library posts for <code>{series_slug}</code>{' ' + quality if quality else ''}.",
         parse_mode=enums.ParseMode.HTML
