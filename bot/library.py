@@ -136,39 +136,44 @@ class LibraryManager:
                     {"_id": entry["_id"]},
                     {"$set": {"updated_at": now, "poster_url": poster_url}}
                 )
+                return  # Success! Exit function.
             except Exception as e:
-                log.error("Failed to update library message %d: %s", msg_id, e)
-        else:
-            # Create new message
-            try:
-                if poster_url:
-                    msg = await self.client.send_photo(
-                        chat_id=self.channel,
-                        photo=poster_url,
-                        caption=caption[:CAPTION_LIMIT],
-                        parse_mode=enums.ParseMode.HTML,
-                        reply_markup=markup,
-                    )
-                else:
-                    msg = await self.client.send_message(
-                        chat_id=self.channel,
-                        text=caption[:CAPTION_LIMIT],
-                        parse_mode=enums.ParseMode.HTML,
-                        disable_web_page_preview=True,
-                        reply_markup=markup,
-                    )
-                # Save to library
-                new_entry = {
+                log.warning("Failed to update library message %d (maybe deleted manually?). Recreating: %s", msg_id, e)
+                # Fall through to create a new message
+                
+        # Create new message (either because it didn't exist, or edit failed)
+        try:
+            if poster_url:
+                msg = await self.client.send_photo(
+                    chat_id=self.channel,
+                    photo=poster_url,
+                    caption=caption[:CAPTION_LIMIT],
+                    parse_mode=enums.ParseMode.HTML,
+                    reply_markup=markup,
+                )
+            else:
+                msg = await self.client.send_message(
+                    chat_id=self.channel,
+                    text=caption[:CAPTION_LIMIT],
+                    parse_mode=enums.ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    reply_markup=markup,
+                )
+            # Upsert DB
+            await self.db.library.update_one(
+                {"series_slug": series_slug, "quality": quality},
+                {"$set": {
                     "series_slug": series_slug,
                     "series_title": series_title,
                     "quality": quality,
-                    "poster_url": poster_url,
                     "message_id": msg.id,
+                    "poster_url": poster_url,
                     "updated_at": now,
-                }
-                await self.db.library.insert_one(new_entry)
-            except Exception as e:
-                log.error("Failed to create library message: %s", e)
+                }},
+                upsert=True
+            )
+        except Exception as e:
+            log.error("Failed to create library message: %s", e)
 
     def _format_caption(self, title: str, all_files: list, quality: str, poster_url: str | None) -> str:
         """Format the caption for a grouped library message."""
