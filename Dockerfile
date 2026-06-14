@@ -9,8 +9,10 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 # Install N_m3u8DL-RE binary
-RUN curl -L -o /usr/local/bin/N_m3u8DL-RE \
-    "https://github.com/nilaoda/N_m3u8DL-RE/releases/latest/download/N_m3u8DL-RE_Beta_linux-x64" && \
+RUN curl -L -o /tmp/N_m3u8DL-RE.tar.gz \
+    "https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.5.1-beta/N_m3u8DL-RE_v0.5.1-beta_linux-x64_20251029.tar.gz" && \
+    tar -xzf /tmp/N_m3u8DL-RE.tar.gz -C /usr/local/bin/ && \
+    rm /tmp/N_m3u8DL-RE.tar.gz && \
     chmod +x /usr/local/bin/N_m3u8DL-RE
 
 
