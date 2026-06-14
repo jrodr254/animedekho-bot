@@ -101,7 +101,10 @@ async def n_m3u8dl_re_download(
     stem = Path(output_path).stem
     save_dir = str(Path(output_path).parent)
 
-    # Build N_m3u8DL-RE command
+    from urllib.parse import urlparse
+    domain = urlparse(stream_url).netloc
+    origin = f"https://{domain}"
+
     cmd = [
         "N_m3u8DL-RE",
         stream_url,
@@ -117,14 +120,15 @@ async def n_m3u8dl_re_download(
         "--mux-after-done", "format=mp4",  # Mux to mp4 using ffmpeg
         "--select-audio", "all",      # Download all available audio tracks
         "--select-subtitle", "all",   # Download all available subtitles
+        "--header", f"Referer: {origin}/",
+        "--header", f"Origin: {origin}",
+        "--header", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     ]
 
-    # If it's a master playlist URL, select the specific quality
-    height = quality.replace("p", "")
-    if height.isdigit():
-        # Select video stream matching the resolution height (e.g. res=1080)
-        cmd.extend(["--select-video", f"res={height}"])
-
+    # We do not use --select-video because target_quality.url is already 
+    # the specific stream playlist extracted from the master playlist.
+    # N_m3u8DL-RE will automatically pick the best (and usually only) video stream.
+    
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -219,8 +223,13 @@ async def download_m3u8(
             [0],
         )
 
+    from urllib.parse import urlparse
+    domain = urlparse(url).netloc
+    headers = f"Referer: https://{domain}/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
+
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y",
+        "-headers", headers,
         "-i", url,
         "-map", "0:v?",
         "-map", "0:a?",
