@@ -129,3 +129,47 @@ async def cmd_setchannellink(client: Client, message: Message):
         )
     else:
         await message.reply_text("⚠️ Database not initialized yet.")
+
+
+@require_owner
+async def cmd_delete(client: Client, message: Message):
+    """Delete a series or specific file from the database."""
+    args = _parse_args(message)
+    if not args:
+        await message.reply_text("Usage: /delete <series_slug> [quality]\n\nExample: /delete naruto-shippuden 1080p")
+        return
+        
+    series_slug = args[0]
+    quality = args[1] if len(args) > 1 else None
+    
+    from bot.database import db
+    from bot.library import library_manager
+    if not db:
+        await message.reply_text("⚠️ Database not initialized.")
+        return
+        
+    query = {"series_slug": series_slug}
+    if quality:
+        query["quality"] = quality
+        
+    # Delete from files collection
+    deleted_files = await db.files.delete_many(query)
+    
+    # Delete from library collection and remove channel messages
+    cursor = db.library.find(query)
+    messages_deleted = 0
+    async for entry in cursor:
+        msg_id = entry.get("message_id")
+        if msg_id and library_manager and library_manager.channel:
+            try:
+                await client.delete_messages(library_manager.channel, msg_id)
+            except Exception as e:
+                log.warning("Could not delete channel message %s: %s", msg_id, e)
+        messages_deleted += 1
+        
+    await db.library.delete_many(query)
+    
+    await message.reply_text(
+        f"🗑️ Deleted {deleted_files.deleted_count} files and {messages_deleted} library posts for <code>{series_slug}</code>{' ' + quality if quality else ''}.",
+        parse_mode=enums.ParseMode.HTML
+    )

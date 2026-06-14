@@ -59,6 +59,7 @@ async def _on_start(client: Client):
             BotCommand("setlogchannel", "Set log channel ID"),
             BotCommand("setmainchannel", "Set main channel ID"),
             BotCommand("setchannellink", "Set channel invite link"),
+            BotCommand("delete", "Delete a series or file"),
         ], scope=BotCommandScopeChat(settings.bot.owner_id))
         log.info("Bot commands set successfully")
     except Exception as e:
