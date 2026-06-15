@@ -46,14 +46,14 @@ class HttpClient:
     def _key(url: str) -> str:
         return hashlib.md5(url.encode()).hexdigest()
 
-    async def get(self, url: str, ttl: int | None = None) -> str:
+    async def get(self, url: str, ttl: int | None = None, **kwargs) -> str:
         ttl = ttl if ttl is not None else settings.cache.default_ttl
         k = self._key(url)
         cached = await self._cache.get(k)
         if cached is not None:
             return cached
         await self.start()
-        async with self._session.get(url) as r:
+        async with self._session.get(url, **kwargs) as r:
             r.raise_for_status()
             text = await r.text()
         await self._cache.set(k, text, ttl)
@@ -73,17 +73,22 @@ class HttpClient:
             await self._cache.set(k, text, ttl)
         return text
 
-    async def get_json(self, url: str, ttl: int | None = None):
+    async def get_json(self, url: str, ttl: int | None = None, **kwargs) -> dict:
         ttl = ttl if ttl is not None else settings.cache.default_ttl
-        k = self._key(url + ":j")
+        k = self._key(url)
         cached = await self._cache.get(k)
         if cached is not None:
-            return cached
+            import json
+            try:
+                return json.loads(cached)
+            except Exception:
+                pass
         await self.start()
-        async with self._session.get(url) as r:
+        async with self._session.get(url, **kwargs) as r:
             r.raise_for_status()
             data = await r.json()
-        await self._cache.set(k, data, ttl)
+            import json
+            await self._cache.set(k, json.dumps(data), ttl)
         return data
 
     # ── Uncached helpers (for shortener bypass & redirects) ───────

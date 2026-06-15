@@ -113,6 +113,10 @@ async def n_m3u8dl_re_download(
         domain = parsed.netloc
         
     origin = f"https://{domain}"
+    if "megacloud" in domain or "rabbit" in domain or "dokicloud" in domain:
+        origin = "https://megacloud.tv"
+    elif "vmeas" in domain or "vidmoly" in domain:
+        origin = "https://vidmoly.to"
 
     cmd = [
         "N_m3u8DL-RE",
@@ -121,7 +125,6 @@ async def n_m3u8dl_re_download(
         "--save-name", stem,
         "--tmp-dir", str(_SEGMENTS_DIR),
         "--del-after-done",           # Clean up segment temp files
-        "--check-segments-count", "False", # Don't error if segments mismatch
         "--thread-count", "16",       # Fast parallel download
         "--download-retry-count", "5",  # Retry failed segments
         "--binary-merge",             # Use binary merge (faster)
@@ -133,11 +136,9 @@ async def n_m3u8dl_re_download(
         "--header", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     ]
 
-    q_val = quality.lower().replace("p", "")
-    if q_val in ["1080", "720", "480", "360"]:
-        cmd.extend(["-sv", f"res='{q_val}':for=best"])
-    else:
-        cmd.extend(["--auto-select"])
+    # The URL is already the specific playlist for the chosen quality (extracted by resolver)
+    # or it's a master playlist and the user wants "auto". In both cases, auto-select is correct.
+    cmd.extend(["--auto-select"])
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -243,7 +244,13 @@ async def download_m3u8(
     else:
         domain = parsed.netloc
         
-    headers = f"Referer: https://{domain}/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
+    origin = f"https://{domain}"
+    if "megacloud" in domain or "rabbit" in domain or "dokicloud" in domain:
+        origin = "https://megacloud.tv"
+    elif "vmeas" in domain or "vidmoly" in domain:
+        origin = "https://vidmoly.to"
+        
+    headers = f"Referer: {origin}/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
 
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y",
