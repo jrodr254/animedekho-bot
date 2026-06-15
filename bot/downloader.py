@@ -123,8 +123,13 @@ async def n_m3u8dl_re_download(
         "--header", f"Referer: {origin}/",
         "--header", f"Origin: {origin}",
         "--header", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "--select-video", "best"      # Always pick the highest quality stream
     ]
+
+    q_val = quality.lower().replace("p", "")
+    if q_val in ["1080", "720", "480", "360"]:
+        cmd.extend(["-sv", f"res='{q_val}':for=best"])
+    else:
+        cmd.extend(["--auto-select"])
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,

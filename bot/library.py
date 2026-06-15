@@ -94,21 +94,34 @@ class LibraryManager:
             upsert=True,
         )
 
-        # Get all downloaded episodes for this series and quality
-        cursor = self.db.files.find({"series_slug": series_slug, "quality": quality})
+        # Get all downloaded qualities for this series and episode
+        cursor = self.db.files.find({"series_slug": series_slug, "episode_key": episode_key})
         all_files = await cursor.to_list(length=None)
-        all_files.sort(key=lambda x: _ep_sort_key(x["episode_key"]))
+        # sort qualities high to low
+        all_files.sort(key=lambda x: {"1080p": 3, "720p": 2, "480p": 1, "360p": 0}.get(x.get("quality", ""), 0), reverse=True)
 
         entry = await self.db.library.find_one(
-            {"series_slug": series_slug, "quality": quality}
+            {"series_slug": series_slug, "episode_key": episode_key}
         )
 
         # Build message components
-        caption = self._format_caption(series_title, all_files, quality, poster_url)
-        deep = f"https://t.me/{self.bot_username}?start=get_{series_slug}_{quality}_all"
+        caption = self._format_caption(series_title, episode_key, poster_url)
         
         from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton(quality, url=deep)]])
+        
+        buttons = []
+        row = []
+        for f in all_files:
+            q = f.get("quality", "Auto")
+            deep = f"https://t.me/{self.bot_username}?start=get_{series_slug}_{q}_{episode_key}"
+            row.append(InlineKeyboardButton(q, url=deep))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+            
+        markup = InlineKeyboardMarkup(buttons)
 
         if entry and entry.get("message_id"):
             # Update existing message
@@ -161,11 +174,11 @@ class LibraryManager:
                 )
             # Upsert DB
             await self.db.library.update_one(
-                {"series_slug": series_slug, "quality": quality},
+                {"series_slug": series_slug, "episode_key": episode_key},
                 {"$set": {
                     "series_slug": series_slug,
                     "series_title": series_title,
-                    "quality": quality,
+                    "episode_key": episode_key,
                     "message_id": msg.id,
                     "poster_url": poster_url,
                     "updated_at": now,
@@ -175,45 +188,25 @@ class LibraryManager:
         except Exception as e:
             log.error("Failed to create library message: %s", e)
 
-    def _format_caption(self, title: str, all_files: list, quality: str, poster_url: str | None) -> str:
-        """Format the caption for a grouped library message."""
+    def _format_caption(self, title: str, episode_key: str, poster_url: str | None) -> str:
+        """Format the caption for a single episode message."""
         import html as htmlmod
         import re
         
         title_esc = htmlmod.escape(title)
         
-        # Analyze episodes to format "1 - 5" or "1, 2, 3"
-        ep_numbers = []
         season = 1
         is_movie = False
+        episode_str = "0"
         
-        for f in all_files:
-            k = f["episode_key"]
-            if k.lower() == "movie":
-                is_movie = True
-            else:
-                m = re.match(r"S(\d+)E(\d+)", k, re.IGNORECASE)
-                if m:
-                    season = int(m.group(1))
-                    ep_numbers.append(int(m.group(2)))
-                    
-        ep_numbers = sorted(list(set(ep_numbers)))
-        
-        if is_movie:
+        if episode_key.lower() == "movie":
+            is_movie = True
             episode_str = "Movie"
-        elif not ep_numbers:
-            episode_str = "0"
-        elif len(ep_numbers) == 1:
-            episode_str = str(ep_numbers[0])
         else:
-            # If sequential, show range
-            if ep_numbers[-1] - ep_numbers[0] == len(ep_numbers) - 1:
-                episode_str = f"{ep_numbers[0]} - {ep_numbers[-1]}"
-            else:
-                # Comma separated
-                episode_str = ", ".join(str(x) for x in ep_numbers[:10])
-                if len(ep_numbers) > 10:
-                    episode_str += "..."
+            m = re.match(r"S(\d+)E(\d+)", episode_key, re.IGNORECASE)
+            if m:
+                season = int(m.group(1))
+                episode_str = str(int(m.group(2)))
 
         status = "FINISHED"
         genres = "Action, Adventure, Comedy, Drama, Fantasy"
