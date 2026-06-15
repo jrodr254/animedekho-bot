@@ -88,8 +88,11 @@ async def get_m3u8_qualities(m3u8_url: str) -> list[Quality]:
         content = await http_client.get(m3u8_url, headers=headers, ttl=60)
         qualities = parse_m3u8_qualities(content, m3u8_url)
         if qualities:
+            log.info("Found %d quality variants in master m3u8: %s", len(qualities),
+                     ", ".join(q.resolution for q in qualities))
             return qualities
         # Not a master playlist — single quality
+        log.info("No variants in m3u8 (single stream): %s", m3u8_url[:80])
         return [Quality(resolution="auto", url=m3u8_url, label="Auto")]
     except Exception as e:
         log.warning("Failed to fetch m3u8 qualities from %s: %s", m3u8_url, e)
@@ -285,28 +288,69 @@ async def _resolve_packed_player(url: str) -> dict | None:
 
 
 def _scan_for_stream(text: str) -> dict | None:
-    """Scan *text* for m3u8/mp4 stream URLs."""
-    for pattern in [
+    """Scan *text* for m3u8/mp4 stream URLs.
+    
+    Priority: master playlist > generic m3u8 > mp4.
+    Collects ALL m3u8 URLs and picks the best one (master playlist preferred).
+    """
+    all_m3u8: list[str] = []
+    
+    # Collect ALL m3u8 URLs from common patterns
+    m3u8_patterns = [
         r'file\s*:\s*"(https?://[^"]+\.m3u8[^"]*)"',
         r'source\s*:\s*"(https?://[^"]+\.m3u8[^"]*)"',
         r'src\s*:\s*"(https?://[^"]+\.m3u8[^"]*)"',
         r"file\s*:\s*'(https?://[^']+\.m3u8[^']*)'",
         r"source\s*:\s*'(https?://[^']+\.m3u8[^']*)'",
         r'sources\s*:\s*\[\s*\{[^}]*file\s*:\s*"(https?://[^"]+\.m3u8[^"]*)"',
-        r'file\s*:\s*"(https?://[^"]+\.mp4[^"]*)"',
-        r'source\s*:\s*"(https?://[^"]+\.mp4[^"]*)"',
-        r'"(https?://[^"]+master\.m3u8[^"]*)"',
-        r'"(https?://[^"]+index\.m3u8[^"]*)"',
-        r"'(https?://[^']+master\.m3u8[^']*)'",
-        r"'(https?://[^']+index\.m3u8[^']*)'",
         r'"(https?://[^"]+\.m3u8[^"]*)"',
         r"'(https?://[^']+\.m3u8[^']*)'",
-    ]:
+    ]
+    
+    seen = set()
+    for pattern in m3u8_patterns:
+        for m in re.finditer(pattern, text):
+            url = m.group(1)
+            if url not in seen:
+                seen.add(url)
+                all_m3u8.append(url)
+    
+    if all_m3u8:
+        # Prefer master/index playlists (these contain quality variants)
+        master_keywords = ("master", "index", "playlist", "main")
+        # Also deprioritize URLs that look like specific quality variants
+        variant_keywords = ("240", "360", "480", "720", "1080", "/chunk", "/seg")
+        
+        def _score(url: str) -> int:
+            """Higher score = more likely to be master playlist."""
+            u = url.lower()
+            score = 0
+            # Boost for master playlist indicators
+            for kw in master_keywords:
+                if kw in u:
+                    score += 10
+            # Penalize URLs that look like quality-specific variants
+            for kw in variant_keywords:
+                if kw in u:
+                    score -= 5
+            return score
+        
+        best = max(all_m3u8, key=_score)
+        log.info("Found %d m3u8 URLs, selected best: %s", len(all_m3u8), best[:100])
+        if len(all_m3u8) > 1:
+            log.debug("All m3u8 URLs found: %s", [u[:80] for u in all_m3u8])
+        return {"url": best, "type": "m3u8", "quality": "auto"}
+    
+    # Fallback: mp4 URLs
+    mp4_patterns = [
+        r'file\s*:\s*"(https?://[^"]+\.mp4[^"]*)"',
+        r'source\s*:\s*"(https?://[^"]+\.mp4[^"]*)"',
+    ]
+    for pattern in mp4_patterns:
         m = re.search(pattern, text)
         if m:
-            video_url = m.group(1)
-            vtype = "m3u8" if ".m3u8" in video_url else "mp4"
-            return {"url": video_url, "type": vtype, "quality": "auto"}
+            return {"url": m.group(1), "type": "mp4", "quality": "auto"}
+    
     return None
 
 

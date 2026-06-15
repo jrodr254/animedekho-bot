@@ -145,25 +145,28 @@ def quality_picker(
     back_cb: str,
     is_movie: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Show 3 default quality buttons (480p, 720p, 1080p). Server selection is automatic."""
+    """Show quality buttons. Marks available ones with ✅, unavailable with ⚡ (will use closest)."""
     buttons = []
     prefix = "mdl" if is_movie else "dl"
     ss = short_slug(slug, 48)
 
-    # Always show the 3 default quality buttons regardless of what was detected
     default_q = settings.site.default_qualities  # ["480p", "720p", "1080p"]
+
+    # Normalize detected qualities for comparison
+    detected = {q.lower() for q in qualities} if qualities else set()
 
     row: list[InlineKeyboardButton] = []
     for q in default_q:
         cb = _safe_cb(f"{prefix}:{q}:{ss}")
+        available = q in detected or "auto" in detected
         if q == "1080p":
-            label = "📥 1080p (FHD)"
+            label = f"{'📥' if available else '⚡'} 1080p (FHD)"
         elif q == "720p":
-            label = "📥 720p (HD)"
+            label = f"{'📥' if available else '⚡'} 720p (HD)"
         elif q == "480p":
-            label = "📥 480p (SD)"
+            label = f"{'📥' if available else '⚡'} 480p (SD)"
         else:
-            label = f"📥 {q}"
+            label = f"{'📥' if available else '⚡'} {q}"
         row.append(InlineKeyboardButton(label, callback_data=cb))
         if len(row) >= 3:
             buttons.append(row)

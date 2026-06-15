@@ -311,6 +311,10 @@ async def _handle_download(client: Client, q: CallbackQuery, quality_pref: str, 
         await _safe_edit(q, "⚠️ No downloadable URL found on any server.")
         return
 
+    # Warn user if quality doesn't match what they requested
+    if quality.resolution != quality_pref and quality.resolution != "auto":
+        log.info("Quality fallback: requested %s, got %s", quality_pref, quality.resolution)
+
     # Extract season/episode info for filename
     import re
     m = re.match(r".*-(\d+)x(\d+)", ep_slug)
@@ -346,9 +350,13 @@ async def _handle_download(client: Client, q: CallbackQuery, quality_pref: str, 
             user.id, user.username or str(user.id), title, quality.resolution
         )
 
-    # Send progress message and start download in background
+    # Send progress message — show actual quality (may differ from requested)
+    quality_label = quality.resolution
+    if quality.resolution != quality_pref and quality.resolution != quality_pref:
+        quality_label = f"{quality.resolution} (requested {quality_pref})"
+
     progress_msg = await q.message.reply_text(
-        f"📥 <b>Starting download:</b> {esc(title)} [{quality.resolution}]",
+        f"📥 <b>Starting download:</b> {esc(title)} [{quality_label}]",
         parse_mode=enums.ParseMode.HTML,
     )
 
@@ -736,9 +744,8 @@ async def _populate_server_qualities(servers: list):
     """Extract stream URLs and qualities using the resolver.
     
     Priority order: VidStream first, then HydraX, then Vidmoly.
-    Only falls back to next server if current server completely fails.
-    The resolver extracts real m3u8/mp4 URLs from player pages and
-    parses the m3u8 master playlist to get quality variants.
+    Tries ALL servers to find one with proper quality variants (720p/1080p).
+    If no server has multi-quality, falls back to the first server with any stream.
     """
     from extractors.resolver import resolve_player_url
     from config.settings import settings
@@ -755,9 +762,12 @@ async def _populate_server_qualities(servers: list):
 
     sorted_servers = sorted(servers, key=_server_priority)
 
+    # Track the first server with any result (even "auto") as fallback
+    first_auto_server = None
+
     for srv in sorted_servers:
-        if srv.qualities:
-            return  # Already have qualities from a server
+        if srv.qualities and any(q.resolution != "auto" for q in srv.qualities):
+            return  # Already have proper multi-quality from a server
         url = srv.player_url or srv.direct_url
         if not url:
             continue
@@ -767,9 +777,17 @@ async def _populate_server_qualities(servers: list):
             result = await resolve_player_url(url)
             if result:
                 if result.get("qualities"):
+                    has_real_qualities = any(
+                        q.resolution != "auto" for q in result["qualities"]
+                    )
                     srv.qualities = result["qualities"]
-                    log.info("Resolver found %d qualities on %s", len(srv.qualities), srv.name)
-                    return
+                    log.info("Resolver found %d qualities on %s: %s",
+                             len(srv.qualities), srv.name,
+                             ", ".join(q.resolution for q in srv.qualities))
+                    if has_real_qualities:
+                        return  # Found a server with proper 480p/720p/1080p variants
+                    elif not first_auto_server:
+                        first_auto_server = srv
                 elif result.get("url"):
                     vtype = result.get("type", "mp4")
                     srv.direct_url = result["url"]
@@ -779,11 +797,17 @@ async def _populate_server_qualities(servers: list):
                         url=result["url"],
                         label=f"Auto ({vtype.upper()})"
                     )]
-                    return
+                    if not first_auto_server:
+                        first_auto_server = srv
+                    # Don't return — keep trying other servers for multi-quality
+                    log.info("Server %s has only 'auto' quality, trying others for multi-quality...", srv.name)
         except Exception as e:
             log.debug("Resolver failed for %s: %s", srv.name, e)
 
-        log.info("Server %s failed, trying next in priority order...", srv.name)
+        log.info("Server %s: no multi-quality variants, trying next...", srv.name)
+    
+    if first_auto_server:
+        log.info("No server had multi-quality variants. Using %s with 'auto' quality.", first_auto_server.name)
 
 
 def _pick_quality(srv, quality_idx: int):
@@ -798,13 +822,16 @@ def _pick_quality(srv, quality_idx: int):
 
 
 def _find_quality_match(servers: list, quality_pref: str) -> Quality | None:
-    """Find the best quality matching preference across servers.
+    """Find the best quality matching preference across ALL servers.
     
-    Server priority: VidStream → HydraX → Vidmoly.
-    Only checks next server if current has no matching quality.
+    Strategy:
+    1. Collect ALL qualities from ALL servers (prioritized order)
+    2. Try exact match first
+    3. Fall back to closest match
+    4. Last resort: any "auto" stream
     """
     from config.settings import settings
-    preferred = settings.site.preferred_servers  # ["VidStream", "HydraX", "Vidmoly"]
+    preferred = settings.site.preferred_servers
 
     # Sort servers by priority
     def _server_priority(srv):
@@ -816,23 +843,28 @@ def _find_quality_match(servers: list, quality_pref: str) -> Quality | None:
 
     sorted_servers = sorted(servers, key=_server_priority)
 
-    # Try each server in priority order
+    if quality_pref == "auto":
+        for srv in sorted_servers:
+            if srv.qualities:
+                return srv.qualities[0]
+        for srv in sorted_servers:
+            if srv.direct_url:
+                return Quality(resolution="auto", url=srv.direct_url)
+        return None
+
+    # Pass 1: exact match across ALL servers (priority order)
     for srv in sorted_servers:
-        if not srv.qualities:
-            continue
-
-        if quality_pref == "auto":
-            return srv.qualities[0]  # Highest quality
-
-        # Try exact match on this server
         for q in srv.qualities:
             if q.resolution == quality_pref:
+                log.info("Exact quality match: %s on server %s", quality_pref, srv.name)
                 return q
 
-        # Try closest match on this server
-        pref_height = int(quality_pref.replace("p", "")) if quality_pref.endswith("p") else 0
-        best = None
-        best_diff = float("inf")
+    # Pass 2: closest numeric match across ALL servers
+    pref_height = int(quality_pref.replace("p", "")) if quality_pref.endswith("p") else 0
+    best = None
+    best_diff = float("inf")
+    best_server = ""
+    for srv in sorted_servers:
         for q in srv.qualities:
             try:
                 h = int(q.resolution.replace("p", ""))
@@ -840,14 +872,22 @@ def _find_quality_match(servers: list, quality_pref: str) -> Quality | None:
                 if diff < best_diff:
                     best_diff = diff
                     best = q
+                    best_server = srv.name
             except ValueError:
                 continue
 
-        if best:
-            return best
-        elif srv.qualities:
-            # If we couldn't match numerically (e.g., "auto"), just return the best quality on this preferred server
-            return srv.qualities[0]
+    if best:
+        log.warning("Quality %s not found. Closest match: %s on server %s",
+                     quality_pref, best.resolution, best_server)
+        return best
+
+    # Pass 3: any "auto" quality
+    for srv in sorted_servers:
+        for q in srv.qualities:
+            if q.resolution == "auto":
+                log.warning("Quality %s not found. Falling back to 'auto' on server %s",
+                             quality_pref, srv.name)
+                return q
 
     # Last resort: any direct URL
     for srv in sorted_servers:
