@@ -49,8 +49,6 @@ async def cmd_help(client: Client, message: Message):
         "/adduser &lt;id&gt; — Approve a user\n"
         "/removeuser &lt;id&gt; — Remove a user\n"
         "/users — List approved users\n"
-        "/setlogchannel &lt;id&gt; — Set log channel\n"
-        "/setmainchannel &lt;id&gt; — Set main channel\n"
         "/setchannellink &lt;url&gt; — Set channel invite link",
         parse_mode=enums.ParseMode.HTML,
     )

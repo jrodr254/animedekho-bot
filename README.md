@@ -147,12 +147,10 @@ python main.py
 - Just type any anime name to search
 
 ### Owner Commands
-- `/adduser <id>` — Approve a user
-- `/removeuser <id>` — Remove a user
+- `/adduser <id>` — Approve a user to use the bot
+- `/removeuser <id>` — Revoke access
 - `/users` — List approved users
-- `/setlogchannel <id>` — Set log channel
-- `/setmainchannel <id>` — Set main channel
-- `/setchannellink <url>` — Set force-sub invite link
+- `/setchannellink <url>` — Set the force-subscribe invite link
 
 ## License
 

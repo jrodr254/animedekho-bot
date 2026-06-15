@@ -62,48 +62,6 @@ async def cmd_users(client: Client, message: Message):
     )
 
 
-@require_owner
-async def cmd_setlogchannel(client: Client, message: Message):
-    args = _parse_args(message)
-    if not args or not args[0].lstrip("-").isdigit():
-        await message.reply_text("Usage: /setlogchannel <channel_id>\n\nTip: forward a message from the channel to @userinfobot to get the ID.")
-        return
-    cid = int(args[0])
-    if bot.logger.bot_logger:
-        # Test sending a message to the channel
-        try:
-            await client.send_message(cid, "🔗 Log channel connected!")
-            await message.reply_text(f"✅ Log channel set to <code>{cid}</code>\nTest message sent successfully!", parse_mode=enums.ParseMode.HTML)
-            bot.logger.bot_logger.set_log_channel(cid)
-        except Exception as e:
-            await message.reply_text(f"❌ Failed to send message to log channel <code>{cid}</code>.\nError: <code>{e}</code>\n\nMake sure the bot is an admin with 'Send Messages' permission and the ID starts with -100.", parse_mode=enums.ParseMode.HTML)
-    else:
-        await message.reply_text("⚠️ Logger not initialized yet.")
-
-
-@require_owner
-async def cmd_setmainchannel(client: Client, message: Message):
-    args = _parse_args(message)
-    if not args or not args[0].lstrip("-").isdigit():
-        await message.reply_text("Usage: /setmainchannel <channel_id>")
-        return
-    cid = int(args[0])
-    if bot.logger.bot_logger:
-        bot.logger.bot_logger.set_main_channel(cid)
-        from bot.library import library_manager
-        if library_manager:
-            library_manager.channel = cid
-        
-        # Test sending a message to the channel
-        try:
-            await client.send_message(cid, "🔗 Main channel connected!")
-            await message.reply_text(f"✅ Main channel set to <code>{cid}</code>\nTest message sent successfully!", parse_mode=enums.ParseMode.HTML)
-            bot.logger.bot_logger.set_main_channel(cid)
-        except Exception as e:
-            await message.reply_text(f"❌ Failed to send message to main channel <code>{cid}</code>.\nError: <code>{e}</code>\n\nMake sure the bot is an admin with 'Send Messages' permission and the ID starts with -100.", parse_mode=enums.ParseMode.HTML)
-    else:
-        await message.reply_text("⚠️ Logger not initialized yet.")
-
 
 @require_owner
 async def cmd_setchannellink(client: Client, message: Message):

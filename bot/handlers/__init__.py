@@ -6,14 +6,14 @@ from .callbacks import callback_router
 from .messages import handle_text
 from .admin import (
     cmd_adduser, cmd_removeuser, cmd_users,
-    cmd_setlogchannel, cmd_setmainchannel, cmd_setchannellink,
+    cmd_setchannellink,
     cmd_delete,
 )
 
 __all__ = [
     "cmd_start", "cmd_help", "callback_router", "handle_text",
     "cmd_adduser", "cmd_removeuser", "cmd_users",
-    "cmd_setlogchannel", "cmd_setmainchannel", "cmd_setchannellink",
+    "cmd_setchannellink",
     "cmd_delete",
     "register_handlers",
 ]
@@ -29,8 +29,6 @@ def register_handlers(app: Client):
     app.add_handler(MessageHandler(cmd_adduser, filters.command("adduser") & filters.private))
     app.add_handler(MessageHandler(cmd_removeuser, filters.command("removeuser") & filters.private))
     app.add_handler(MessageHandler(cmd_users, filters.command("users") & filters.private))
-    app.add_handler(MessageHandler(cmd_setlogchannel, filters.command("setlogchannel") & filters.private))
-    app.add_handler(MessageHandler(cmd_setmainchannel, filters.command("setmainchannel") & filters.private))
     app.add_handler(MessageHandler(cmd_setchannellink, filters.command("setchannellink") & filters.private))
     app.add_handler(MessageHandler(cmd_delete, filters.command("delete") & filters.private))
 

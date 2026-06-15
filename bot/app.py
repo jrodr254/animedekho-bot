@@ -56,8 +56,6 @@ async def _on_start(client: Client):
             BotCommand("adduser", "Approve a user"),
             BotCommand("removeuser", "Remove a user"),
             BotCommand("users", "List approved users"),
-            BotCommand("setlogchannel", "Set log channel ID"),
-            BotCommand("setmainchannel", "Set main channel ID"),
             BotCommand("setchannellink", "Set channel invite link"),
             BotCommand("delete", "Delete a series or file"),
         ], scope=BotCommandScopeChat(settings.bot.owner_id))
