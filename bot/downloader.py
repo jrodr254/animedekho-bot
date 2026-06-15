@@ -112,8 +112,6 @@ async def n_m3u8dl_re_download(
         "--save-name", stem,
         "--tmp-dir", str(_SEGMENTS_DIR),
         "--del-after-done",           # Clean up segment temp files
-        "--no-log",                   # Don't create log file
-        "--log-level", "WARN",        # Minimal console output
         "--thread-count", "16",       # Fast parallel download
         "--download-retry-count", "5",  # Retry failed segments
         "--binary-merge",             # Use binary merge (faster)
@@ -137,42 +135,46 @@ async def n_m3u8dl_re_download(
     )
 
     async def _monitor():
-        """Monitor download progress by checking file size."""
-        start = time.time()
-        while proc.returncode is None:
-            await asyncio.sleep(3)
-            # Check for the output file (N_m3u8DL-RE may use .mp4)
-            if os.path.exists(output_path):
-                size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                elapsed = time.time() - start
-                if progress_msg:
-                    await _update_progress(
-                        progress_msg,
-                        f"📥 <b>Downloading:</b> {title} [{quality}]\n"
-                        f"💾 {size_mb:.1f} MB downloaded\n"
-                        f"⏱ {elapsed:.0f}s elapsed",
-                        last_edit,
-                    )
-            else:
-                # Check for partial/temp files in save_dir
-                partials = list(Path(save_dir).glob(f"*{stem}*"))
-                if partials:
-                    total_size = sum(p.stat().st_size for p in partials if p.exists())
-                    size_mb = total_size / (1024 * 1024)
-                    elapsed = time.time() - start
-                    if progress_msg:
-                        await _update_progress(
-                            progress_msg,
-                            f"📥 <b>Downloading:</b> {title} [{quality}]\n"
-                            f"💾 {size_mb:.1f} MB downloaded\n"
-                            f"⏱ {elapsed:.0f}s elapsed",
-                            last_edit,
-                        )
+        """Monitor download progress by parsing N_m3u8DL-RE output."""
+        buffer = bytearray()
+        while True:
+            try:
+                char = await proc.stdout.read(1)
+                if not char:
+                    break
+                if char in (b'\r', b'\n'):
+                    line = buffer.decode('utf-8', errors='replace').strip()
+                    buffer.clear()
+                    if line and "%" in line:
+                        # strip ansi codes
+                        line = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', line)
+                        percent_match = re.search(r"(\d+(\.\d+)?)%", line)
+                        if percent_match:
+                            pct_val = percent_match.group(1)
+                            speed_match = re.search(r"(\d+(\.\d+)?\s*[MKG]?i?(B/s|bps|b/s|bit/s))", line, re.I)
+                            speed_val = speed_match.group(1) if speed_match else "0 MB/s"
+                            size_match = re.search(r"(\d+(\.\d+)?\s*\S+)\s*/\s*(\d+(\.\d+)?\s*\S+)", line, re.I)
+                            down_size = size_match.group(1) if size_match else "?"
+                            total_size = size_match.group(3) if size_match else "?"
+                            
+                            if progress_msg:
+                                await _update_progress(
+                                    progress_msg,
+                                    f"📥 <b>Downloading:</b> {title} [{quality}]\n"
+                                    f"{_progress_bar(float(pct_val))}\n"
+                                    f"⚡ Speed: {speed_val}\n"
+                                    f"💾 Size: {down_size} / {total_size}",
+                                    last_edit,
+                                )
+                else:
+                    buffer.extend(char)
+            except Exception:
+                break
 
     monitor_task = asyncio.create_task(_monitor())
 
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=900)  # 15 min timeout
+        await asyncio.wait_for(proc.wait(), timeout=900)  # 15 min timeout
     except asyncio.TimeoutError:
         proc.kill()
         monitor_task.cancel()
@@ -186,9 +188,7 @@ async def n_m3u8dl_re_download(
             pass
 
     if proc.returncode != 0:
-        stderr_text = stderr.decode() if stderr else ""
-        stdout_text = stdout.decode() if stdout else ""
-        log.error("N_m3u8DL-RE failed (%d): %s %s", proc.returncode, stderr_text[-500:], stdout_text[-500:])
+        log.error("N_m3u8DL-RE failed (%d)", proc.returncode)
         return False
 
     # N_m3u8DL-RE might create the file with the name directly
