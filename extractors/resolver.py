@@ -40,6 +40,8 @@ async def resolve_player_url(player_url: str) -> dict | None:
     try:
         if "vimeo.com" in domain:
             result = await _resolve_vimeo(resolved_url)
+        elif any(x in domain for x in ("vidstream", "rabbitstream", "megacloud")):
+            result = await _resolve_vidstream_sidecar(resolved_url)
         elif any(x in domain for x in ("streamwish", "swish", "playerwish")):
             result = await _resolve_packed_player(resolved_url)
         elif any(x in domain for x in ("filemoon", "kerapoxy")):
@@ -321,3 +323,31 @@ async def _resolve_generic(url: str) -> dict | None:
     """Last resort — scan page for any m3u8/mp4 URL."""
     html = await http_client.get(url, ttl=60)
     return _scan_for_stream(html)
+
+async def _resolve_vidstream_sidecar(url: str) -> dict | None:
+    """
+    Call the local Node.js sidecar service to decrypt the VidStream/RabbitStream AES encryption.
+    """
+    import os
+    from urllib.parse import quote
+    
+    # URL of our Docker sidecar
+    sidecar_url = os.environ.get("VIDSTREAM_API_URL", "http://vidstream-api:4030")
+    
+    try:
+        res = await http_client.get_json(f"{sidecar_url}/decrypt?url={quote(url)}")
+        
+        # Format is typically {"sources": [{"file": "https://...master.m3u8", "type": "hls"}]}
+        if not res or not res.get("sources"):
+            return None
+            
+        source = res["sources"][0]
+        stream_url = source.get("file")
+        if not stream_url:
+            return None
+            
+        vtype = "m3u8" if "hls" in source.get("type", "").lower() or ".m3u8" in stream_url else "mp4"
+        return {"url": stream_url, "type": vtype, "quality": "auto"}
+    except Exception as e:
+        log.warning("VidStream sidecar extraction failed for %s: %s", url, e)
+        return None

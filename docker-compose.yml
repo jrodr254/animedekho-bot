@@ -11,6 +11,16 @@ services:
       - bot-tmp:/tmp/animedekho_dl
     depends_on:
       - mongo
+      - vidstream-api
+    environment:
+      - VIDSTREAM_API_URL=http://vidstream-api:4030
+
+  vidstream-api:
+    build: ./vidstream-api
+    container_name: animedekho-vidstream
+    restart: unless-stopped
+    expose:
+      - "4030"
 
   mongo:
     image: mongo:7
