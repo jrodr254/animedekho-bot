@@ -101,8 +101,17 @@ async def n_m3u8dl_re_download(
     stem = Path(output_path).stem
     save_dir = str(Path(output_path).parent)
 
-    from urllib.parse import urlparse
-    domain = urlparse(stream_url).netloc
+    from urllib.parse import urlparse, parse_qs
+    parsed = urlparse(stream_url)
+    
+    # If the URL is our sidecar decryptor, extract the real target URL for headers
+    if "localhost" in parsed.netloc or "127.0.0.1" in parsed.netloc:
+        qs = parse_qs(parsed.query)
+        real_url = qs.get("url", [stream_url])[0]
+        domain = urlparse(real_url).netloc
+    else:
+        domain = parsed.netloc
+        
     origin = f"https://{domain}"
 
     cmd = [
@@ -112,6 +121,7 @@ async def n_m3u8dl_re_download(
         "--save-name", stem,
         "--tmp-dir", str(_SEGMENTS_DIR),
         "--del-after-done",           # Clean up segment temp files
+        "--check-segments-count", "False", # Don't error if segments mismatch
         "--thread-count", "16",       # Fast parallel download
         "--download-retry-count", "5",  # Retry failed segments
         "--binary-merge",             # Use binary merge (faster)
@@ -224,8 +234,15 @@ async def download_m3u8(
             [0],
         )
 
-    from urllib.parse import urlparse
-    domain = urlparse(url).netloc
+    from urllib.parse import urlparse, parse_qs
+    parsed = urlparse(url)
+    if "localhost" in parsed.netloc or "127.0.0.1" in parsed.netloc:
+        qs = parse_qs(parsed.query)
+        real_url = qs.get("url", [url])[0]
+        domain = urlparse(real_url).netloc
+    else:
+        domain = parsed.netloc
+        
     headers = f"Referer: https://{domain}/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
 
     proc = await asyncio.create_subprocess_exec(
