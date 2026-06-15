@@ -75,7 +75,17 @@ async def get_m3u8_qualities(m3u8_url: str) -> list[Quality]:
     If it's not a master playlist (no variants), return a single 'auto' quality.
     """
     try:
-        content = await http_client.get(m3u8_url, ttl=60)
+        from urllib.parse import urlparse
+        domain = urlparse(m3u8_url).netloc
+        headers = {}
+        if "megacloud" in domain or "rabbit" in domain or "dokicloud" in domain:
+            headers["Referer"] = "https://megacloud.tv/"
+        elif "vmeas" in domain or "vidmoly" in domain:
+            headers["Referer"] = "https://vidmoly.to/"
+        elif domain:
+            headers["Referer"] = f"https://{domain}/"
+            
+        content = await http_client.get(m3u8_url, headers=headers, ttl=60)
         qualities = parse_m3u8_qualities(content, m3u8_url)
         if qualities:
             return qualities
