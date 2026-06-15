@@ -132,7 +132,6 @@ async def n_m3u8dl_re_download(
         "--select-audio", "all",      # Download all available audio tracks
         "--select-subtitle", "all",   # Download all available subtitles
         "--header", f"Referer: {origin}/",
-        "--header", f"Origin: {origin}",
         "--header", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     ]
 
