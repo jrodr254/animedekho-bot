@@ -128,7 +128,7 @@ def parse_m3u8_qualities(m3u8_content: str, base_url: str) -> list[Quality]:
 
         # Next non-empty, non-comment line is the URL
         url = ""
-        for j in range(i + 1, min(i + 3, len(lines))):
+        for j in range(i + 1, min(i + 6, len(lines))):
             candidate = lines[j].strip()
             if candidate and not candidate.startswith("#"):
                 url = candidate
