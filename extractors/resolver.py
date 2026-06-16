@@ -36,11 +36,12 @@ async def resolve_player_url(player_url: str) -> dict | None:
     resolved_url = await detect_and_bypass(player_url, http_client=http_client)
 
     domain = _get_domain(resolved_url)
+    log.info("Resolving URL: %s (domain: %s, original: %s)", resolved_url, domain, player_url)
 
     try:
         if "vimeo.com" in domain:
             result = await _resolve_vimeo(resolved_url)
-        elif any(x in domain for x in ("vidstream", "rabbitstream", "megacloud")):
+        elif any(x in domain for x in ("vidstream", "rabbitstream", "megacloud", "as-cdn", "fireplayer")):
             result = await _resolve_vidstream_sidecar(resolved_url)
         elif any(x in domain for x in ("streamwish", "swish", "playerwish")):
             result = await _resolve_packed_player(resolved_url)
@@ -165,6 +166,7 @@ def parse_m3u8_qualities(m3u8_content: str, base_url: str) -> list[Quality]:
             url=url,
             bandwidth=bandwidth,
             label=label,
+            master_url=base_url,
         ))
 
     # Sort by bandwidth (highest first)
@@ -380,18 +382,27 @@ async def _resolve_generic(url: str) -> dict | None:
 
 async def _resolve_vidstream_sidecar(url: str) -> dict | None:
     """
-    Call the local Node.js sidecar service to decrypt the VidStream/RabbitStream AES encryption.
+    Resolve VidStream / FirePlayer URLs (as-cdn*.top and similar).
+    
+    Calls the FirePlayer getVideo API to obtain the master m3u8 with all qualities.
+    Falls back to the Node.js sidecar for rabbitstream/megacloud domains.
     """
     import os
-    from urllib.parse import quote
+    from urllib.parse import quote, urlparse
     
-    # URL of our Docker sidecar
-    sidecar_url = os.environ.get("VIDSTREAM_API_URL", "http://vidstream-api:4030")
+    parsed = urlparse(url)
+    domain = parsed.netloc
+    
+    # FirePlayer domains (as-cdn*.top pattern) — use direct API
+    if "as-cdn" in domain or "fireplayer" in domain:
+        return await _resolve_fireplayer(url)
+    
+    # RabbitStream/MegaCloud — use Node.js sidecar
+    sidecar_url = os.environ.get("VIDSTREAM_API_URL", "http://localhost:4030")
     
     try:
         res = await http_client.get_json(f"{sidecar_url}/decrypt?url={quote(url)}")
         
-        # Format is typically {"sources": [{"file": "https://...master.m3u8", "type": "hls"}]}
         if not res or not res.get("sources"):
             return None
             
@@ -404,4 +415,47 @@ async def _resolve_vidstream_sidecar(url: str) -> dict | None:
         return {"url": stream_url, "type": vtype, "quality": "auto"}
     except Exception as e:
         log.warning("VidStream sidecar extraction failed for %s: %s", url, e)
+        return None
+
+
+async def _resolve_fireplayer(url: str) -> dict | None:
+    """
+    Extract stream from FirePlayer (as-cdn*.top) by calling its getVideo API.
+    Returns master m3u8 URL with all quality variants.
+    """
+    from urllib.parse import urlparse
+    
+    parsed = urlparse(url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    # Extract video ID from URL path: /video/{id} or /embed/{id}
+    path_parts = parsed.path.strip("/").split("/")
+    if len(path_parts) < 2:
+        return None
+    video_id = path_parts[-1]
+    
+    try:
+        api_url = f"{base_url}/player/index.php?data={video_id}&do=getVideo"
+        headers = {
+            "Referer": url,
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": base_url,
+        }
+        post_data = {"hash": video_id, "r": "https://animedekho.app/"}
+        
+        import json
+        res_text = await http_client.post_no_cache(api_url, data=post_data, headers=headers)
+        
+        if not res_text:
+            return None
+        
+        res = json.loads(res_text)
+        stream_url = res.get("videoSource") or res.get("securedLink")
+        if not stream_url:
+            return None
+        
+        vtype = "m3u8" if ".m3u8" in stream_url or res.get("hls") else "mp4"
+        log.info("FirePlayer resolved: %s (type: %s)", stream_url, vtype)
+        return {"url": stream_url, "type": vtype, "quality": "auto"}
+    except Exception as e:
+        log.warning("FirePlayer extraction failed for %s: %s", url, e)
         return None

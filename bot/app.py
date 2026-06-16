@@ -41,6 +41,15 @@ async def _on_start(client: Client):
         bot_username=bot_username,
     )
     log.info("Library manager initialized (bot: @%s)", bot_username)
+
+    # Resolve channel peers so Pyrogram can send to them
+    for name, cid in [("main", settings.bot.main_channel), ("log", settings.bot.log_channel)]:
+        if cid:
+            try:
+                chat = await client.get_chat(cid)
+                log.info("Resolved %s channel: %s (id: %d)", name, chat.title, chat.id)
+            except Exception as e:
+                log.warning("Could not resolve %s channel %d: %s", name, cid, e)
     # Set bot commands menu
     from pyrogram.types import BotCommand, BotCommandScopeChat
     try:

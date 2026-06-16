@@ -128,6 +128,7 @@ async def n_m3u8dl_re_download(
         "--thread-count", "16",       # Fast parallel download
         "--download-retry-count", "5",  # Retry failed segments
         "--binary-merge",             # Use binary merge (faster)
+        "--no-ansi-color",            # Disable ANSI colors
         "--mux-after-done", "format=mp4",  # Mux to mp4 using ffmpeg
         "--select-audio", "all",      # Download all available audio tracks
         "--select-subtitle", "all",   # Download all available subtitles
@@ -135,51 +136,56 @@ async def n_m3u8dl_re_download(
         "--header", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     ]
 
-    # The URL is already the specific playlist for the chosen quality (extracted by resolver)
-    # or it's a master playlist and the user wants "auto". In both cases, auto-select is correct.
-    cmd.extend(["--auto-select"])
+    # If this is a master m3u8 with multiple qualities, select the specific one
+    # by matching resolution. Otherwise auto-select.
+    if quality and quality not in ("auto",):
+        # Extract height number from quality string like "1080p" -> "1080"
+        height = quality.replace("p", "") if quality.endswith("p") else ""
+        if height.isdigit():
+            cmd.extend(["--select-video", f"res={height}*"])
+        else:
+            cmd.extend(["--auto-select"])
+    else:
+        cmd.extend(["--auto-select"])
+    # Use 'script' as PTY wrapper to prevent N_m3u8DL-RE Spectre.Console crash in headless
+    import shlex
+    shell_cmd = " ".join(shlex.quote(c) for c in cmd)
     proc = await asyncio.create_subprocess_exec(
-        *cmd,
+        "script", "-qc", shell_cmd, "/dev/null",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
 
     async def _monitor():
-        """Monitor download progress by parsing N_m3u8DL-RE output."""
-        buffer = bytearray()
-        while True:
+        """Monitor download progress by checking output file size."""
+        import time as _time
+        start = _time.time()
+        last_size = 0
+        while proc.returncode is None:
+            await asyncio.sleep(3)
+            # Check for partial files in segments dir or output
             try:
-                char = await proc.stdout.read(1)
-                if not char:
-                    break
-                if char in (b'\r', b'\n'):
-                    line = buffer.decode('utf-8', errors='replace').strip()
-                    buffer.clear()
-                    if line and "%" in line:
-                        # strip ansi codes
-                        line = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', line)
-                        percent_match = re.search(r"(\d+(\.\d+)?)%", line)
-                        if percent_match:
-                            pct_val = percent_match.group(1)
-                            speed_match = re.search(r"(\d+(\.\d+)?\s*[MKG]?i?(B/s|bps|b/s|bit/s))", line, re.I)
-                            speed_val = speed_match.group(1) if speed_match else "0 MB/s"
-                            size_match = re.search(r"(\d+(\.\d+)?\s*\S+)\s*/\s*(\d+(\.\d+)?\s*\S+)", line, re.I)
-                            down_size = size_match.group(1) if size_match else "?"
-                            total_size = size_match.group(3) if size_match else "?"
-                            
-                            if progress_msg:
-                                await _update_progress(
-                                    progress_msg,
-                                    f"📥 <b>Downloading:</b> {title} [{quality}]\n"
-                                    f"{_progress_bar(float(pct_val))}\n"
-                                    f"⚡ Speed: {speed_val}\n"
-                                    f"💾 Size: {down_size} / {total_size}",
-                                    last_edit,
-                                )
-                else:
-                    buffer.extend(char)
+                save_dir_path = Path(save_dir)
+                total_size = 0
+                for f in save_dir_path.glob("**/*"):
+                    if f.is_file():
+                        total_size += f.stat().st_size
+                size_mb = total_size / (1024 * 1024)
+                elapsed = _time.time() - start
+                if elapsed > 0 and total_size > 0:
+                    speed = (total_size - last_size) / (3 * 1024 * 1024)  # MB/s approx
+                    last_size = total_size
+                    if progress_msg and size_mb > 1:
+                        await _update_progress(
+                            progress_msg,
+                            f"📥 <b>Downloading:</b> {title} [{quality}]\n"
+                            f"⏳ Elapsed: {int(elapsed)}s\n"
+                            f"💾 Downloaded: {size_mb:.1f} MB\n"
+                            f"⚡ Speed: ~{speed:.1f} MB/s",
+                            last_edit,
+                        )
             except Exception:
-                break
+                pass
 
     monitor_task = asyncio.create_task(_monitor())
 

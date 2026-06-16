@@ -10,6 +10,7 @@ class Quality:
     url: str
     bandwidth: int = 0
     label: str = ""          # human-readable like "720p (HD)"
+    master_url: str = ""     # master m3u8 URL (for multi-audio/subtitle)
 
     def __post_init__(self):
         if not self.label:

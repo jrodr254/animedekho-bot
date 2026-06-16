@@ -210,9 +210,7 @@ class LibraryManager:
 
         status = "FINISHED"
         genres = "Action, Adventure, Comedy, Drama, Fantasy"
-        audio = "Dual Audio" if "Dual" in title or "Hindi" in title else "Japanese"
-        if "Hindi" in title:
-            audio = "Dual Audio"
+        audio = "Multi Audio (Japanese, English & Hindi)"
             
         caption = (
             f"◆ {title_esc} ◆ ❞\n"

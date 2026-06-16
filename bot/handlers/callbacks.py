@@ -133,6 +133,10 @@ async def _handle_series_detail(client: Client, q: CallbackQuery, slug: str):
         text += f"\n📂 <b>{series.season_count} Season(s)</b> · {series.total_episodes} episodes\nSelect a season:"
         markup = kb.season_picker(series)
 
+    # Cache poster for later use in library
+    if series.poster:
+        _poster_cache[series.slug] = series.poster
+
     if series.poster:
         try:
             await q.message.delete()
@@ -341,8 +345,8 @@ async def _handle_download(client: Client, q: CallbackQuery, quality_pref: str, 
             except Exception as e:
                 log.warning("Cached file send failed, will re-download: %s", e)
 
-    # Get poster from stored data
-    poster_url = None
+    # Get poster from cache
+    poster_url = _poster_cache.get(series_slug, "") if series_slug else ""
 
     # Log
     if bot.logger.bot_logger:
@@ -544,7 +548,7 @@ async def _do_batch_download(client: Client, chat_id, series, season, episodes, 
             )
 
             success, sent_msg = await download_and_upload(
-                chat_id, quality.url, quality.resolution, filename,
+                chat_id, quality.master_url or quality.url, quality.resolution, filename,
                 f"{series.title} S{season}E{ep.number}",
                 ep_msg, client,
             )
@@ -643,7 +647,7 @@ async def _do_download(client: Client, chat_id, quality, filename, title, progre
     try:
         # quality.url is the direct m3u8/mp4 stream URL (from resolver)
         success, sent_msg = await download_and_upload(
-            chat_id, quality.url, quality.resolution, filename, title, progress_msg, client
+            chat_id, quality.master_url or quality.url, quality.resolution, filename, title, progress_msg, client
         )
         if success and bot.logger.bot_logger:
             await bot.logger.bot_logger.log_download_complete(title, quality.resolution, 0)
@@ -743,9 +747,8 @@ def _sort_qualities(qualities: set[str]) -> list[str]:
 async def _populate_server_qualities(servers: list):
     """Extract stream URLs and qualities using the resolver.
     
-    Priority order: VidStream first, then HydraX, then Vidmoly.
-    Tries ALL servers to find one with proper quality variants (720p/1080p).
-    If no server has multi-quality, falls back to the first server with any stream.
+    Priority: VidStream first. Only falls back to HydraX (then Vidmoly)
+    if VidStream completely fails (no stream at all).
     """
     from extractors.resolver import resolve_player_url
     from config.settings import settings
@@ -758,36 +761,26 @@ async def _populate_server_qualities(servers: list):
         for i, pref in enumerate(preferred):
             if pref.lower() in name_lower:
                 return i
-        return len(preferred)  # Non-preferred servers go last
+        return len(preferred)
 
     sorted_servers = sorted(servers, key=_server_priority)
 
-    # Track the first server with any result (even "auto") as fallback
-    first_auto_server = None
-
     for srv in sorted_servers:
         if srv.qualities and any(q.resolution != "auto" for q in srv.qualities):
-            return  # Already have proper multi-quality from a server
+            return  # Already resolved
         url = srv.player_url or srv.direct_url
         if not url:
             continue
 
-        # Use resolver to extract stream URL and parse m3u8 qualities
         try:
             result = await resolve_player_url(url)
             if result:
                 if result.get("qualities"):
-                    has_real_qualities = any(
-                        q.resolution != "auto" for q in result["qualities"]
-                    )
                     srv.qualities = result["qualities"]
                     log.info("Resolver found %d qualities on %s: %s",
                              len(srv.qualities), srv.name,
                              ", ".join(q.resolution for q in srv.qualities))
-                    if has_real_qualities:
-                        return  # Found a server with proper 480p/720p/1080p variants
-                    elif not first_auto_server:
-                        first_auto_server = srv
+                    return  # Use this server — don't check others
                 elif result.get("url"):
                     vtype = result.get("type", "mp4")
                     srv.direct_url = result["url"]
@@ -797,17 +790,12 @@ async def _populate_server_qualities(servers: list):
                         url=result["url"],
                         label=f"Auto ({vtype.upper()})"
                     )]
-                    if not first_auto_server:
-                        first_auto_server = srv
-                    # Don't return — keep trying other servers for multi-quality
-                    log.info("Server %s has only 'auto' quality, trying others for multi-quality...", srv.name)
+                    log.info("Server %s resolved with 'auto' quality, using it.", srv.name)
+                    return  # Use this server — don't check others
         except Exception as e:
             log.debug("Resolver failed for %s: %s", srv.name, e)
 
-        log.info("Server %s: no multi-quality variants, trying next...", srv.name)
-    
-    if first_auto_server:
-        log.info("No server had multi-quality variants. Using %s with 'auto' quality.", first_auto_server.name)
+        log.info("Server %s: failed to resolve, trying next...", srv.name)
 
 
 def _pick_quality(srv, quality_idx: int):
@@ -822,13 +810,10 @@ def _pick_quality(srv, quality_idx: int):
 
 
 def _find_quality_match(servers: list, quality_pref: str) -> Quality | None:
-    """Find the best quality matching preference across ALL servers.
+    """Find the best quality matching preference.
     
-    Strategy:
-    1. Collect ALL qualities from ALL servers (prioritized order)
-    2. Try exact match first
-    3. Fall back to closest match
-    4. Last resort: any "auto" stream
+    Uses whichever server was resolved by _populate_server_qualities
+    (VidStream first, fallback to HydraX/Vidmoly).
     """
     from config.settings import settings
     preferred = settings.site.preferred_servers
@@ -900,13 +885,18 @@ def _find_quality_match(servers: list, quality_pref: str) -> Quality | None:
 
 _server_cache: dict[str, dict] = {}
 
+# ── Poster cache (series_slug -> poster_url) ──────────────────────────
 
-def _store_servers(chat_id: int, key: str, servers: list, title: str = ""):
+_poster_cache: dict[str, str] = {}
+
+
+def _store_servers(chat_id: int, key: str, servers: list, title: str = "", poster_url: str = ""):
     """Store resolved servers for download callbacks."""
     cache_key = f"{chat_id}:{key}"
     _server_cache[cache_key] = {
         "servers": servers,
         "title": title,
+        "poster_url": poster_url,
     }
     # Keep cache bounded
     if len(_server_cache) > 200:
