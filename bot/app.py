@@ -43,13 +43,26 @@ async def _on_start(client: Client):
     log.info("Library manager initialized (bot: @%s)", bot_username)
 
     # Resolve channel peers so Pyrogram can send to them
+    # Try get_chat first, fall back to raw API (needed on fresh sessions)
     for name, cid in [("main", settings.bot.main_channel), ("log", settings.bot.log_channel)]:
         if cid:
             try:
                 chat = await client.get_chat(cid)
                 log.info("Resolved %s channel: %s (id: %d)", name, chat.title, chat.id)
-            except Exception as e:
-                log.warning("Could not resolve %s channel %d: %s", name, cid, e)
+            except Exception:
+                # Raw API fallback for fresh sessions without cached peers
+                try:
+                    from pyrogram.raw.functions.channels import GetChannels
+                    from pyrogram.raw.types import InputChannel
+                    raw_id = abs(cid) % (10 ** 10)  # Strip -100 prefix
+                    peer = InputChannel(channel_id=raw_id, access_hash=0)
+                    result = await client.invoke(GetChannels(id=[peer]))
+                    if result.chats:
+                        log.info("Resolved %s channel via raw API: %s", name, result.chats[0].title)
+                    else:
+                        log.warning("Could not resolve %s channel %d via raw API", name, cid)
+                except Exception as e2:
+                    log.warning("Could not resolve %s channel %d: %s", name, cid, e2)
     # Set bot commands menu
     from pyrogram.types import BotCommand, BotCommandScopeChat
     try:

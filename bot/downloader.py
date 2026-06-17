@@ -327,13 +327,22 @@ async def download_m3u8(
 
     headers = f"Referer: {origin}/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
 
+    # Build ffmpeg command — for master m3u8 with multiple programs,
+    # select the highest quality program instead of failing
+    is_master = "master" in url.lower()
+    
+    if is_master:
+        # Map the last program (highest quality) — master playlists list
+        # variants in ascending bitrate order
+        map_args = ["-map", "0:p:3?", "-map", "0:a?", "-map", "0:s?"]
+    else:
+        map_args = ["-map", "0:v?", "-map", "0:a?", "-map", "0:s?"]
+
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y",
         "-headers", headers,
         "-i", url,
-        "-map", "0:v?",
-        "-map", "0:a?",
-        "-map", "0:s?",
+        *map_args,
         "-c:v", "copy",
         "-c:a", "copy",
         "-c:s", "mov_text",
@@ -394,8 +403,16 @@ async def download_and_upload(
     title: str,
     progress_msg: Message,
     client: Client,
+    variant_url: str = "",
 ) -> tuple[bool, Message | None]:
-    """Download video + upload via Pyrogram MTProto. Returns (success, sent_message)."""
+    """Download video + upload via Pyrogram MTProto.
+    
+    Args:
+        stream_url: Master m3u8 URL (for N_m3u8DL-RE which can select quality)
+        variant_url: Specific quality variant URL (for ffmpeg fallback which can't handle master)
+    
+    Returns (success, sent_message).
+    """
     output_path = str(_TEMP_DIR / filename)
     overall_start = time.time()
 
@@ -404,6 +421,7 @@ async def download_and_upload(
         is_m3u8 = ".m3u8" in stream_url.lower()
 
         if is_m3u8:
+            # N_m3u8DL-RE handles master m3u8 with --select-video
             success = await n_m3u8dl_re_download(
                 stream_url, quality, output_path, progress_msg, title
             )
@@ -419,7 +437,9 @@ async def download_and_upload(
                         )
                     except Exception:
                         pass
-                success = await download_m3u8(stream_url, output_path, progress_msg, title, quality)
+                # ffmpeg needs the specific variant URL (not master)
+                ffmpeg_url = variant_url or stream_url
+                success = await download_m3u8(ffmpeg_url, output_path, progress_msg, title, quality)
         else:
             success = await download_m3u8(stream_url, output_path, progress_msg, title, quality)
 

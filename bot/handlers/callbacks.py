@@ -523,7 +523,7 @@ async def _do_batch_download(client: Client, chat_id, series, season, episodes, 
             success, sent_msg = await download_and_upload(
                 chat_id, quality.master_url or quality.url, quality.resolution, filename,
                 f"{series.title} S{season}E{ep.number}",
-                ep_msg, client,
+                ep_msg, client, variant_url=quality.url,
             )
 
             if success:
@@ -628,7 +628,8 @@ async def _do_download(client: Client, chat_id, quality, filename, title, progre
     try:
         # quality.url is the direct m3u8/mp4 stream URL (from resolver)
         success, sent_msg = await download_and_upload(
-            chat_id, quality.master_url or quality.url, quality.resolution, filename, title, progress_msg, client
+            chat_id, quality.master_url or quality.url, quality.resolution, filename, title, progress_msg, client,
+            variant_url=quality.url,
         )
         if success and bot.logger.bot_logger:
             await bot.logger.bot_logger.log_download_complete(title, quality.resolution, 0)
