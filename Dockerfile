@@ -7,6 +7,7 @@ RUN apt-get update && \
     curl \
     ca-certificates \
     libicu-dev \
+    bsdutils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install N_m3u8DL-RE binary (auto-detect architecture)

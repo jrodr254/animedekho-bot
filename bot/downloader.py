@@ -219,12 +219,15 @@ async def n_m3u8dl_re_download(
     else:
         cmd.extend(["--auto-select"])
 
-    # TERM=dumb prevents Spectre.Console crash in headless environments
+    # Use 'script' PTY wrapper to prevent N_m3u8DL-RE Spectre.Console crash
+    import shlex
+    shell_cmd = " ".join(shlex.quote(c) for c in cmd)
+    
     env = os.environ.copy()
     env["TERM"] = "dumb"
 
     proc = await asyncio.create_subprocess_exec(
-        *cmd,
+        "script", "-qc", shell_cmd, "/dev/null",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
@@ -428,9 +431,10 @@ async def download_and_upload(
                         )
                     except Exception:
                         pass
-                # Use master URL for ffmpeg too — variant URLs may be encrypted/expired
-                # ffmpeg will select the right program via -map
-                success = await download_m3u8(stream_url, output_path, progress_msg, title, quality)
+                # Use variant URL for ffmpeg (with auth params preserved)
+                # Master m3u8 doesn't work with ffmpeg's stream mapping
+                ffmpeg_url = variant_url or stream_url
+                success = await download_m3u8(ffmpeg_url, output_path, progress_msg, title, quality)
         else:
             success = await download_m3u8(stream_url, output_path, progress_msg, title, quality)
 
