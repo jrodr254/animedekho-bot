@@ -303,8 +303,16 @@ async def _handle_download(client: Client, q: CallbackQuery, quality_pref: str, 
                     "episode_key": episode_key,
                 })
 
-    # Get poster from cache
+    # Get poster from cache — if not cached, fetch from API
     poster_url = _poster_cache.get(series_slug, "") if series_slug else ""
+    if not poster_url and series_slug:
+        try:
+            series_data = await api.get_series(series_slug)
+            if series_data and series_data.poster:
+                poster_url = series_data.poster
+                _poster_cache[series_slug] = poster_url
+        except Exception:
+            pass
 
     # Log
     if bot.logger.bot_logger:
