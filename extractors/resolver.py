@@ -141,9 +141,16 @@ def parse_m3u8_qualities(m3u8_content: str, base_url: str) -> list[Quality]:
         if not url:
             continue
 
-        # Resolve relative URLs
+        # Resolve relative URLs — preserve auth query params from master URL
         if not url.startswith("http"):
-            url = urljoin(base_url, url)
+            from urllib.parse import urlparse, urlunparse, urlencode, parse_qs
+            resolved = urljoin(base_url, url)
+            # If master URL had query params (auth tokens), append them
+            master_parsed = urlparse(base_url)
+            resolved_parsed = urlparse(resolved)
+            if master_parsed.query and not resolved_parsed.query:
+                resolved = resolved + "?" + master_parsed.query
+            url = resolved
 
         if not resolution:
             # Try to infer from bandwidth (anime encodes are highly compressed)

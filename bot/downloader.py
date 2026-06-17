@@ -327,24 +327,13 @@ async def download_m3u8(
 
     headers = f"Referer: {origin}/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
 
-    # For master m3u8 with multiple programs/variants:
-    # Map quality to program index (master lists variants in ascending bitrate)
-    # Typical order: 240p(0), 360p(1), 480p(2), 720p(3), 1080p(4)
-    is_master = "master" in url.lower()
-    
-    if is_master:
-        # Select program by quality preference
-        program_map = {"1080p": 4, "720p": 3, "480p": 2, "360p": 1, "240p": 0}
-        prog_idx = program_map.get(quality, 4)  # default highest
-        map_args = ["-map", f"p:{prog_idx}"]
-    else:
-        map_args = ["-map", "0:v?", "-map", "0:a?", "-map", "0:s?"]
-
+    # For HLS master playlists, ffmpeg auto-selects the highest bandwidth
+    # variant by default. No -map needed — just let it pick.
+    # For single variant playlists, -map 0 grabs everything.
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y",
         "-headers", headers,
         "-i", url,
-        *map_args,
         "-c:v", "copy",
         "-c:a", "copy",
         "-c:s", "mov_text",
