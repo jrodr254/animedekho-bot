@@ -6,6 +6,7 @@ RUN apt-get update && \
     ffmpeg \
     curl \
     ca-certificates \
+    libicu-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install N_m3u8DL-RE binary (auto-detect architecture)

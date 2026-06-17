@@ -327,14 +327,16 @@ async def download_m3u8(
 
     headers = f"Referer: {origin}/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
 
-    # Build ffmpeg command — for master m3u8 with multiple programs,
-    # select the highest quality program instead of failing
+    # For master m3u8 with multiple programs/variants:
+    # Map quality to program index (master lists variants in ascending bitrate)
+    # Typical order: 240p(0), 360p(1), 480p(2), 720p(3), 1080p(4)
     is_master = "master" in url.lower()
     
     if is_master:
-        # Map the last program (highest quality) — master playlists list
-        # variants in ascending bitrate order
-        map_args = ["-map", "0:p:3?", "-map", "0:a?", "-map", "0:s?"]
+        # Select program by quality preference
+        program_map = {"1080p": 4, "720p": 3, "480p": 2, "360p": 1, "240p": 0}
+        prog_idx = program_map.get(quality, 4)  # default highest
+        map_args = ["-map", f"p:{prog_idx}"]
     else:
         map_args = ["-map", "0:v?", "-map", "0:a?", "-map", "0:s?"]
 
@@ -437,9 +439,9 @@ async def download_and_upload(
                         )
                     except Exception:
                         pass
-                # ffmpeg needs the specific variant URL (not master)
-                ffmpeg_url = variant_url or stream_url
-                success = await download_m3u8(ffmpeg_url, output_path, progress_msg, title, quality)
+                # Use master URL for ffmpeg too — variant URLs may be encrypted/expired
+                # ffmpeg will select the right program via -map
+                success = await download_m3u8(stream_url, output_path, progress_msg, title, quality)
         else:
             success = await download_m3u8(stream_url, output_path, progress_msg, title, quality)
 
