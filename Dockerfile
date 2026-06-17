@@ -8,9 +8,14 @@ RUN apt-get update && \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install N_m3u8DL-RE binary
-RUN curl -L -o /tmp/N_m3u8DL-RE.tar.gz \
-    "https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.5.1-beta/N_m3u8DL-RE_v0.5.1-beta_linux-x64_20251029.tar.gz" && \
+# Install N_m3u8DL-RE binary (auto-detect architecture)
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
+      URL="https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.5.1-beta/N_m3u8DL-RE_v0.5.1-beta_linux-arm64_20251029.tar.gz"; \
+    else \
+      URL="https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.5.1-beta/N_m3u8DL-RE_v0.5.1-beta_linux-x64_20251029.tar.gz"; \
+    fi && \
+    curl -L -o /tmp/N_m3u8DL-RE.tar.gz "$URL" && \
     tar -xzf /tmp/N_m3u8DL-RE.tar.gz -C /usr/local/bin/ && \
     rm /tmp/N_m3u8DL-RE.tar.gz && \
     chmod +x /usr/local/bin/N_m3u8DL-RE
