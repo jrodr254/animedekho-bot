@@ -6,3 +6,5 @@ venv/
 .venv/
 data/
 animedekho_bot.session*
+.env
+animedekho_bot.session

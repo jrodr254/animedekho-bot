@@ -30,10 +30,7 @@ def _safe_url_btn(label: str, url: str) -> InlineKeyboardButton | None:
 
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📺 Recent Series", callback_data="rp:1"),
-            InlineKeyboardButton("🎬 Movies", callback_data="mp:1"),
-        ],
+        [InlineKeyboardButton("📺 Recent Series", callback_data="rp:1")],
         [InlineKeyboardButton("📂 Browse Genres", callback_data="m:genres")],
     ])
 

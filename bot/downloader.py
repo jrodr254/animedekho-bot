@@ -17,29 +17,22 @@ from api.models import Quality
 
 log = logging.getLogger(__name__)
 
-# Pyrogram MTProto upload limit (2 GB)
 TG_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024
 
-# Temp directory for downloads
 _TEMP_DIR = Path(tempfile.gettempdir()) / "animedekho_dl"
 _TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# N_m3u8DL-RE tmp segments directory
 _SEGMENTS_DIR = _TEMP_DIR / "segments"
 _SEGMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def sanitize_filename(name: str) -> str:
-    """Remove special characters from filename, keep it clean."""
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', name)
     name = re.sub(r'[\s]+', ' ', name).strip()
-    name = name[:120]
-    return name or "video"
+    return name[:120] or "video"
 
 
-def make_episode_filename(
-    series_title: str, season: int, episode: int, quality: str
-) -> str:
+def make_episode_filename(series_title: str, season: int, episode: int, quality: str) -> str:
     title = sanitize_filename(series_title)
     return f"{title} S{season:01d}E{episode:02d} [{quality}].mp4"
 
@@ -49,17 +42,109 @@ def make_movie_filename(movie_title: str, quality: str) -> str:
     return f"{title} [{quality}].mp4"
 
 
-def _progress_bar(pct: float) -> str:
-    """Generate a text progress bar."""
-    filled = int(pct / 10)
-    bar = "█" * filled + "░" * (10 - filled)
-    return f"[{bar}] {pct:.0f}%"
+# ── Stylish Progress ──────────────────────────────────────────────────
 
 
-async def _update_progress(msg: Message, text: str, last_edit: list[float]):
-    """Edit message with rate limiting (min 3s between edits)."""
+def _progress_bar(pct: float, width: int = 12) -> str:
+    """Beautiful animated progress bar."""
+    filled = int(pct / 100 * width)
+    empty = width - filled
+    bar = "▓" * filled + "░" * empty
+    return bar
+
+
+def _format_size(bytes_val: float) -> str:
+    if bytes_val >= 1024 * 1024 * 1024:
+        return f"{bytes_val / (1024**3):.1f} GB"
+    elif bytes_val >= 1024 * 1024:
+        return f"{bytes_val / (1024**2):.1f} MB"
+    elif bytes_val >= 1024:
+        return f"{bytes_val / 1024:.1f} KB"
+    return f"{bytes_val:.0f} B"
+
+
+def _format_time(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+    return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
+
+
+def _format_speed(bytes_per_sec: float) -> str:
+    if bytes_per_sec >= 1024 * 1024:
+        return f"{bytes_per_sec / (1024**2):.1f} MB/s"
+    elif bytes_per_sec >= 1024:
+        return f"{bytes_per_sec / 1024:.1f} KB/s"
+    return f"{bytes_per_sec:.0f} B/s"
+
+
+def _download_progress_text(title: str, quality: str, size_bytes: float,
+                            elapsed: float, speed: float, phase: str = "download") -> str:
+    """Generate stylish download progress message."""
+    size_str = _format_size(size_bytes)
+    elapsed_str = _format_time(elapsed)
+    speed_str = _format_speed(speed) if speed > 0 else "calculating..."
+
+    if phase == "download":
+        icon = "📥"
+        action = "Downloading"
+    elif phase == "muxing":
+        icon = "🔄"
+        action = "Muxing"
+    elif phase == "upload":
+        icon = "📤"
+        action = "Uploading"
+    else:
+        icon = "⏳"
+        action = "Processing"
+
+    return (
+        f"{icon} <b>{action}</b>\n"
+        f"┌ 📺 {title}\n"
+        f"├ 🎬 Quality: {quality}\n"
+        f"├ 💾 Size: {size_str}\n"
+        f"├ ⚡ Speed: {speed_str}\n"
+        f"├ ⏱ Elapsed: {elapsed_str}\n"
+        f"└ 🔄 Status: In progress..."
+    )
+
+
+def _upload_progress_text(title: str, quality: str, current: int, total: int) -> str:
+    """Generate stylish upload progress message."""
+    pct = current / total * 100 if total > 0 else 0
+    bar = _progress_bar(pct)
+    current_str = _format_size(current)
+    total_str = _format_size(total)
+
+    return (
+        f"📤 <b>Uploading to Telegram</b>\n"
+        f"┌ 📺 {title}\n"
+        f"├ 🎬 Quality: {quality}\n"
+        f"├ {bar} {pct:.0f}%\n"
+        f"├ 💾 {current_str} / {total_str}\n"
+        f"└ 🔄 Uploading via MTProto..."
+    )
+
+
+def _done_text(title: str, quality: str, size_bytes: float, elapsed: float) -> str:
+    """Generate stylish completion message."""
+    size_str = _format_size(size_bytes)
+    time_str = _format_time(elapsed)
+
+    return (
+        f"✅ <b>Download Complete!</b>\n"
+        f"┌ 📺 {title}\n"
+        f"├ 🎬 Quality: {quality}\n"
+        f"├ 💾 Size: {size_str}\n"
+        f"└ ⏱ Time: {time_str}"
+    )
+
+
+async def _update_progress(msg: Message, text: str, last_edit: list[float], interval: float = 4.0):
+    """Edit message with rate limiting."""
     now = time.time()
-    if now - last_edit[0] < 3:
+    if now - last_edit[0] < interval:
         return
     last_edit[0] = now
     try:
@@ -68,7 +153,7 @@ async def _update_progress(msg: Message, text: str, last_edit: list[float]):
         pass
 
 
-# ── N_m3u8DL-RE: Download m3u8/HLS streams ───────────────────────────
+# ── N_m3u8DL-RE ──────────────────────────────────────────────────────
 
 
 async def n_m3u8dl_re_download(
@@ -78,40 +163,29 @@ async def n_m3u8dl_re_download(
     progress_msg: Message | None = None,
     title: str = "video",
 ) -> bool:
-    """
-    Download an m3u8/HLS stream using N_m3u8DL-RE.
-
-    Args:
-        stream_url: The m3u8 stream URL (variant or master playlist)
-        quality: Resolution like "720p", "1080p", "480p"
-        output_path: Where to save the file (full path with .mp4 extension)
-        title: For progress display
-    """
+    """Download m3u8/HLS stream using N_m3u8DL-RE."""
     last_edit = [0.0]
+    start_time = time.time()
 
     if progress_msg:
         await _update_progress(
             progress_msg,
-            f"📥 <b>Downloading:</b> {title} [{quality}]\n"
-            f"{_progress_bar(0)}\n⏳ Starting N_m3u8DL-RE...",
+            _download_progress_text(title, quality, 0, 0, 0),
             [0],
         )
 
-    # Extract save name without extension
     stem = Path(output_path).stem
     save_dir = str(Path(output_path).parent)
 
     from urllib.parse import urlparse, parse_qs
     parsed = urlparse(stream_url)
-    
-    # If the URL is our sidecar decryptor, extract the real target URL for headers
     if "localhost" in parsed.netloc or "127.0.0.1" in parsed.netloc:
         qs = parse_qs(parsed.query)
         real_url = qs.get("url", [stream_url])[0]
         domain = urlparse(real_url).netloc
     else:
         domain = parsed.netloc
-        
+
     origin = f"https://{domain}"
     if "megacloud" in domain or "rabbit" in domain or "dokicloud" in domain:
         origin = "https://megacloud.tv"
@@ -124,22 +198,19 @@ async def n_m3u8dl_re_download(
         "--save-dir", save_dir,
         "--save-name", stem,
         "--tmp-dir", str(_SEGMENTS_DIR),
-        "--del-after-done",           # Clean up segment temp files
-        "--thread-count", "16",       # Fast parallel download
-        "--download-retry-count", "5",  # Retry failed segments
-        "--binary-merge",             # Use binary merge (faster)
-        "--no-ansi-color",            # Disable ANSI colors
-        "--mux-after-done", "format=mp4",  # Mux to mp4 using ffmpeg
-        "--select-audio", "all",      # Download all available audio tracks
-        "--select-subtitle", "all",   # Download all available subtitles
+        "--del-after-done",
+        "--thread-count", "16",
+        "--download-retry-count", "5",
+        "--binary-merge",
+        "--no-ansi-color",
+        "--mux-after-done", "format=mp4",
+        "--select-audio", "all",
+        "--select-subtitle", "all",
         "--header", f"Referer: {origin}/",
         "--header", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     ]
 
-    # If this is a master m3u8 with multiple qualities, select the specific one
-    # by matching resolution. Otherwise auto-select.
     if quality and quality not in ("auto",):
-        # Extract height number from quality string like "1080p" -> "1080"
         height = quality.replace("p", "") if quality.endswith("p") else ""
         if height.isdigit():
             cmd.extend(["--select-video", f"res={height}*"])
@@ -147,50 +218,49 @@ async def n_m3u8dl_re_download(
             cmd.extend(["--auto-select"])
     else:
         cmd.extend(["--auto-select"])
-    # Use 'script' as PTY wrapper to prevent N_m3u8DL-RE Spectre.Console crash in headless
-    import shlex
-    shell_cmd = " ".join(shlex.quote(c) for c in cmd)
+
+    # TERM=dumb prevents Spectre.Console crash in headless environments
+    env = os.environ.copy()
+    env["TERM"] = "dumb"
+
     proc = await asyncio.create_subprocess_exec(
-        "script", "-qc", shell_cmd, "/dev/null",
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
 
     async def _monitor():
-        """Monitor download progress by checking output file size."""
-        import time as _time
-        start = _time.time()
         last_size = 0
         while proc.returncode is None:
-            await asyncio.sleep(3)
-            # Check for partial files in segments dir or output
+            await asyncio.sleep(4)
             try:
-                save_dir_path = Path(save_dir)
                 total_size = 0
-                for f in save_dir_path.glob("**/*"):
+                for f in Path(save_dir).glob("**/*"):
+                    if f.is_file() and (stem in f.name or f.suffix in (".ts", ".m4s", ".mp4", ".m4a")):
+                        total_size += f.stat().st_size
+                # Also check segments dir
+                for f in _SEGMENTS_DIR.glob("**/*"):
                     if f.is_file():
                         total_size += f.stat().st_size
-                size_mb = total_size / (1024 * 1024)
-                elapsed = _time.time() - start
-                if elapsed > 0 and total_size > 0:
-                    speed = (total_size - last_size) / (3 * 1024 * 1024)  # MB/s approx
-                    last_size = total_size
-                    if progress_msg and size_mb > 1:
-                        await _update_progress(
-                            progress_msg,
-                            f"📥 <b>Downloading:</b> {title} [{quality}]\n"
-                            f"⏳ Elapsed: {int(elapsed)}s\n"
-                            f"💾 Downloaded: {size_mb:.1f} MB\n"
-                            f"⚡ Speed: ~{speed:.1f} MB/s",
-                            last_edit,
-                        )
+
+                elapsed = time.time() - start_time
+                speed = max(0, (total_size - last_size)) / 4  # bytes per second
+                last_size = total_size
+
+                if progress_msg and total_size > 100_000:
+                    await _update_progress(
+                        progress_msg,
+                        _download_progress_text(title, quality, total_size, elapsed, speed),
+                        last_edit,
+                    )
             except Exception:
                 pass
 
     monitor_task = asyncio.create_task(_monitor())
 
     try:
-        await asyncio.wait_for(proc.wait(), timeout=900)  # 15 min timeout
+        await asyncio.wait_for(proc.wait(), timeout=2400)
     except asyncio.TimeoutError:
         proc.kill()
         monitor_task.cancel()
@@ -204,13 +274,11 @@ async def n_m3u8dl_re_download(
             pass
 
     if proc.returncode != 0:
-        log.error("N_m3u8DL-RE failed (%d)", proc.returncode)
+        stderr = await proc.stderr.read()
+        log.error("N_m3u8DL-RE failed (%d): %s", proc.returncode, stderr.decode()[-300:])
         return False
 
-    # N_m3u8DL-RE might create the file with the name directly
-    # or with a different extension before muxing. Find it.
     if not os.path.exists(output_path):
-        # Check for variants the muxer might create
         for ext in [".mp4", ".mkv", ".ts"]:
             alt = str(Path(save_dir) / f"{stem}{ext}")
             if os.path.exists(alt):
@@ -221,7 +289,7 @@ async def n_m3u8dl_re_download(
     return os.path.exists(output_path)
 
 
-# ── Fallback: ffmpeg direct m3u8/mp4 download ────────────────────────
+# ── ffmpeg fallback ───────────────────────────────────────────────────
 
 
 async def download_m3u8(
@@ -229,14 +297,16 @@ async def download_m3u8(
     output_path: str,
     progress_msg: Message | None = None,
     title: str = "video",
+    quality: str = "auto",
 ) -> bool:
-    """Fallback: download m3u8/mp4 stream using ffmpeg directly."""
+    """Fallback: download m3u8/mp4 stream using ffmpeg."""
     last_edit = [0.0]
+    start_time = time.time()
 
     if progress_msg:
         await _update_progress(
             progress_msg,
-            f"📥 <b>Downloading:</b> {title}\n{_progress_bar(0)}\n⏳ Starting ffmpeg...",
+            _download_progress_text(title, quality, 0, 0, 0),
             [0],
         )
 
@@ -248,13 +318,13 @@ async def download_m3u8(
         domain = urlparse(real_url).netloc
     else:
         domain = parsed.netloc
-        
+
     origin = f"https://{domain}"
     if "megacloud" in domain or "rabbit" in domain or "dokicloud" in domain:
         origin = "https://megacloud.tv"
     elif "vmeas" in domain or "vidmoly" in domain:
         origin = "https://vidmoly.to"
-        
+
     headers = f"Referer: {origin}/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
 
     proc = await asyncio.create_subprocess_exec(
@@ -275,25 +345,25 @@ async def download_m3u8(
     )
 
     async def _monitor():
-        start = time.time()
+        last_size = 0
         while proc.returncode is None:
-            await asyncio.sleep(3)
+            await asyncio.sleep(4)
             if os.path.exists(output_path):
-                size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                elapsed = time.time() - start
+                size = os.path.getsize(output_path)
+                elapsed = time.time() - start_time
+                speed = max(0, (size - last_size)) / 4
+                last_size = size
                 if progress_msg:
                     await _update_progress(
                         progress_msg,
-                        f"📥 <b>Downloading:</b> {title}\n"
-                        f"💾 {size_mb:.1f} MB downloaded\n"
-                        f"⏱ {elapsed:.0f}s elapsed",
+                        _download_progress_text(title, quality, size, elapsed, speed),
                         last_edit,
                     )
 
     monitor_task = asyncio.create_task(_monitor())
 
     try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=2400)
     except asyncio.TimeoutError:
         proc.kill()
         monitor_task.cancel()
@@ -313,7 +383,7 @@ async def download_m3u8(
     return True
 
 
-# ── Main download + upload function ───────────────────────────────────
+# ── Main download + upload ────────────────────────────────────────────
 
 
 async def download_and_upload(
@@ -325,92 +395,82 @@ async def download_and_upload(
     progress_msg: Message,
     client: Client,
 ) -> tuple[bool, Message | None]:
-    """
-    Download a video using N_m3u8DL-RE (primary) or ffmpeg (fallback)
-    and upload via Pyrogram MTProto.
-
-    Args:
-        stream_url: The m3u8/mp4 stream URL
-        quality: Resolution string like "720p"
-        filename: Output filename
-        title: Display title
-
-    Returns (success, sent_message).
-    """
+    """Download video + upload via Pyrogram MTProto. Returns (success, sent_message)."""
     output_path = str(_TEMP_DIR / filename)
+    overall_start = time.time()
 
     try:
         success = False
-
-        # Determine if this is an m3u8 stream (use N_m3u8DL-RE) or mp4 (use ffmpeg)
         is_m3u8 = ".m3u8" in stream_url.lower()
 
         if is_m3u8:
-            # Primary: download m3u8 with N_m3u8DL-RE
             success = await n_m3u8dl_re_download(
                 stream_url, quality, output_path, progress_msg, title
             )
-
-            # Fallback to ffmpeg if N_m3u8DL-RE fails
             if not success:
                 log.info("N_m3u8DL-RE failed, falling back to ffmpeg for %s", title)
                 if progress_msg:
                     try:
                         await progress_msg.edit_text(
-                            f"📥 <b>Retrying with ffmpeg:</b> {title} [{quality}]",
+                            f"🔄 <b>Switching to ffmpeg...</b>\n"
+                            f"┌ 📺 {title}\n"
+                            f"└ ⏳ N_m3u8DL-RE failed, retrying...",
                             parse_mode=enums.ParseMode.HTML,
                         )
                     except Exception:
                         pass
-                success = await download_m3u8(stream_url, output_path, progress_msg, title)
+                success = await download_m3u8(stream_url, output_path, progress_msg, title, quality)
         else:
-            # Direct mp4 URL — use ffmpeg
-            success = await download_m3u8(stream_url, output_path, progress_msg, title)
+            success = await download_m3u8(stream_url, output_path, progress_msg, title, quality)
 
         if not success:
             await progress_msg.edit_text(
-                f"❌ <b>Download failed:</b> {title}",
+                f"❌ <b>Download Failed</b>\n"
+                f"┌ 📺 {title}\n"
+                f"└ 💔 Could not download from server",
                 parse_mode=enums.ParseMode.HTML,
             )
             return False, None
 
-        # Check file
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             await progress_msg.edit_text(
-                f"❌ <b>Download failed:</b> {title}\nFile is empty.",
+                f"❌ <b>Download Failed</b>\n"
+                f"┌ 📺 {title}\n"
+                f"└ 💔 File is empty",
                 parse_mode=enums.ParseMode.HTML,
             )
             return False, None
 
         file_size = os.path.getsize(output_path)
-        file_size_mb = file_size / (1024 * 1024)
+        file_size_str = _format_size(file_size)
 
         if file_size > TG_UPLOAD_LIMIT:
             await progress_msg.edit_text(
-                f"⚠️ <b>{title}</b>\n"
-                f"File too large ({file_size_mb:.1f} MB > 2048 MB limit).\n"
-                f"Try a lower quality.",
+                f"⚠️ <b>File Too Large</b>\n"
+                f"┌ 📺 {title}\n"
+                f"├ 💾 {file_size_str} (max 2 GB)\n"
+                f"└ 💡 Try a lower quality",
                 parse_mode=enums.ParseMode.HTML,
             )
             return False, None
 
-        # Upload via Pyrogram MTProto
+        # Upload
         upload_last_edit = [0.0]
 
         async def _upload_progress(current: int, total: int):
-            pct = current / total * 100 if total > 0 else 0
-            current_mb = current / (1024 * 1024)
-            total_mb = total / (1024 * 1024)
             await _update_progress(
                 progress_msg,
-                f"📤 <b>Uploading:</b> {title}\n"
-                f"{_progress_bar(pct)}\n"
-                f"💾 {current_mb:.1f} / {total_mb:.1f} MB",
+                _upload_progress_text(title, quality, current, total),
                 upload_last_edit,
+                interval=5.0,
             )
 
         await progress_msg.edit_text(
-            f"📤 <b>Uploading:</b> {title}\n💾 {file_size_mb:.1f} MB",
+            f"📤 <b>Uploading to Telegram</b>\n"
+            f"┌ 📺 {title}\n"
+            f"├ 🎬 Quality: {quality}\n"
+            f"├ 💾 Size: {file_size_str}\n"
+            f"└ 🔄 Starting upload...",
             parse_mode=enums.ParseMode.HTML,
         )
 
@@ -422,8 +482,9 @@ async def download_and_upload(
             progress=_upload_progress,
         )
 
+        total_time = time.time() - overall_start
         await progress_msg.edit_text(
-            f"✅ <b>Done:</b> {title} [{quality}]\n💾 {file_size_mb:.1f} MB",
+            _done_text(title, quality, file_size, total_time),
             parse_mode=enums.ParseMode.HTML,
         )
         return True, sent_msg
@@ -432,18 +493,18 @@ async def download_and_upload(
         log.exception("Download/upload error for %s", title)
         try:
             await progress_msg.edit_text(
-                f"❌ <b>Error:</b> {title}\n{str(e)[:200]}",
+                f"❌ <b>Error</b>\n"
+                f"┌ 📺 {title}\n"
+                f"└ 💔 {str(e)[:200]}",
                 parse_mode=enums.ParseMode.HTML,
             )
         except Exception:
             pass
         return False, None
     finally:
-        # Clean up temp files
         try:
             if os.path.exists(output_path):
                 os.remove(output_path)
-            # Clean partial files
             stem = Path(output_path).stem
             for f in _TEMP_DIR.glob(f"*{stem}*"):
                 f.unlink(missing_ok=True)

@@ -1,10 +1,13 @@
 """Owner-only admin commands."""
 
+import logging
 from pyrogram import Client, enums
 from pyrogram.types import Message
 
 from bot.auth import require_owner, add_user, remove_user, get_users, is_owner
 import bot.logger
+
+log = logging.getLogger(__name__)
 
 
 def _parse_args(message: Message) -> list[str]:
@@ -91,68 +94,268 @@ async def cmd_setchannellink(client: Client, message: Message):
 
 @require_owner
 async def cmd_delete(client: Client, message: Message):
-    """Delete a series, specific quality, or specific episode from the database."""
-    args = _parse_args(message)
-    if not args:
-        await message.reply_text("Usage: /delete <series_slug> [quality] [episode_key]\n\nExamples:\n/delete naruto 1080p\n/delete naruto 1080p S1E01")
-        return
-        
-    series_slug = args[0]
-    quality = args[1] if len(args) > 1 else None
-    episode_key = args[2] if len(args) > 2 else None
-    
+    """Interactive delete — shows all downloaded series as buttons."""
     from bot.database import db
-    from bot.library import library_manager
     if not db:
         await message.reply_text("⚠️ Database not initialized.")
         return
-        
-    query = {"series_slug": series_slug}
-    if quality:
-        query["quality"] = quality
-    if episode_key:
-        query["episode_key"] = episode_key
-        
-    # Delete from files collection
-    deleted_files = await db.files.delete_many(query)
-    
-    # Check if we should delete or just update the library message
-    messages_deleted = 0
-    if episode_key:
-        # We only deleted one episode. We shouldn't delete the whole library post!
-        # Instead, we just trigger an update for the library post by calling _save_locked?
-        # Actually, if we delete the file, the next time someone downloads it will recreate it.
-        # But for now, we'll just let the user know they might need to redownload to fix the message.
-        await message.reply_text(
-            f"🗑️ Deleted {deleted_files.deleted_count} files for <code>{series_slug}</code> {quality or ''} {episode_key}.\n\n"
-            f"<i>Note: The channel message will update automatically the next time you download an episode for this series.</i>",
-            parse_mode=enums.ParseMode.HTML
-        )
+
+    # Get all unique series from files collection
+    pipeline = [
+        {"$group": {
+            "_id": "$series_slug",
+            "title": {"$first": "$series_title"},
+            "count": {"$sum": 1},
+        }},
+        {"$sort": {"title": 1}},
+    ]
+    series_list = await db.files.aggregate(pipeline).to_list(length=100)
+
+    if not series_list:
+        await message.reply_text("📂 No downloaded files in the library.")
         return
-        
-    # If deleting whole series or whole quality, delete the library message
-    cursor = db.library.find(query)
-    async for entry in cursor:
-        msg_id = entry.get("message_id")
-        if msg_id and library_manager and library_manager.channel:
-            try:
-                await client.delete_messages(library_manager.channel, msg_id)
-            except Exception as e:
-                log.warning("Could not delete channel message %s: %s", msg_id, e)
-        messages_deleted += 1
-        
-    await db.library.delete_many(query)
-    
-    if deleted_files.deleted_count == 0:
-        await message.reply_text(
-            f"⚠️ No files found for <code>{series_slug}</code>.\n\n"
-            f"<b>Important:</b> Make sure you are using the exact URL slug with hyphens, not the title!\n"
-            f"For example: use <code>yowayowa-sensei</code> instead of <code>Yowayowa Sensei</code>.",
-            parse_mode=enums.ParseMode.HTML
-        )
-        return
-        
+
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    from utils.helpers import slug_to_title
+
+    buttons = []
+    for s in series_list:
+        slug = s["_id"]
+        title = s.get("title") or slug_to_title(slug)
+        count = s["count"]
+        buttons.append([InlineKeyboardButton(
+            f"📺 {title} ({count} files)",
+            callback_data=f"del:s:{slug[:40]}",
+        )])
+
     await message.reply_text(
-        f"🗑️ Deleted {deleted_files.deleted_count} files and {messages_deleted} library posts for <code>{series_slug}</code>{' ' + quality if quality else ''}.",
-        parse_mode=enums.ParseMode.HTML
+        "🗑️ <b>Delete Manager</b>\n\nSelect a series to manage:",
+        parse_mode=enums.ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
+
+
+async def delete_callback(client: Client, query):
+    """Handle all delete-related callbacks (del:*)."""
+    from bot.database import db
+    from bot.library import library_manager
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    from utils.helpers import slug_to_title
+    from pyrogram import enums as pe
+
+    if not db:
+        await query.answer("DB not ready", show_alert=True)
+        return
+
+    await query.answer()
+    data = query.data
+
+    if data.startswith("del:s:"):
+        # Show episodes for this series
+        series_slug = data[6:]
+        cursor = db.files.find({"series_slug": series_slug})
+        all_files = await cursor.to_list(length=None)
+
+        if not all_files:
+            await query.edit_message_text("⚠️ No files found for this series.")
+            return
+
+        title = all_files[0].get("series_title") or slug_to_title(series_slug)
+
+        # Group by episode
+        episodes: dict[str, list[str]] = {}
+        for f in all_files:
+            ep = f["episode_key"]
+            q = f["quality"]
+            episodes.setdefault(ep, []).append(q)
+
+        # Sort episodes
+        import re
+        def _sort_key(k):
+            m = re.match(r"S(\d+)E(\d+)", k, re.IGNORECASE)
+            return (int(m.group(1)), int(m.group(2))) if m else (999, 0)
+
+        sorted_eps = sorted(episodes.keys(), key=_sort_key)
+
+        buttons = []
+        for ep in sorted_eps:
+            quals = ", ".join(sorted(episodes[ep]))
+            label = f"🎬 {ep} [{quals}]" if ep.lower() == "movie" else f"▶️ {ep} [{quals}]"
+            buttons.append([InlineKeyboardButton(
+                label,
+                callback_data=f"del:e:{series_slug[:30]}:{ep}",
+            )])
+
+        # Add "Delete ALL" button
+        buttons.append([InlineKeyboardButton(
+            f"🗑️ DELETE ENTIRE SERIES ({len(all_files)} files)",
+            callback_data=f"del:all:{series_slug[:40]}",
+        )])
+        # Back button
+        buttons.append([InlineKeyboardButton("◀️ Back", callback_data="del:back")])
+
+        await query.edit_message_text(
+            f"🗑️ <b>{title}</b>\n\n"
+            f"📂 {len(sorted_eps)} episode(s) · {len(all_files)} file(s)\n\n"
+            f"Tap an episode to delete it:",
+            parse_mode=pe.ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    elif data.startswith("del:e:"):
+        # Show confirmation for deleting a specific episode
+        parts = data[6:].rsplit(":", 1)
+        series_slug = parts[0]
+        episode_key = parts[1]
+
+        # Get qualities for this episode
+        cursor = db.files.find({"series_slug": series_slug, "episode_key": episode_key})
+        files = await cursor.to_list(length=None)
+        title = files[0].get("series_title", series_slug) if files else series_slug
+        quals = [f["quality"] for f in files]
+
+        buttons = []
+        # Delete specific quality
+        for q in sorted(quals):
+            buttons.append([InlineKeyboardButton(
+                f"🗑️ Delete {episode_key} [{q}]",
+                callback_data=f"del:x:{series_slug[:25]}:{episode_key}:{q}",
+            )])
+        # Delete all qualities for this episode
+        if len(quals) > 1:
+            buttons.append([InlineKeyboardButton(
+                f"🗑️ Delete {episode_key} [ALL qualities]",
+                callback_data=f"del:x:{series_slug[:25]}:{episode_key}:*",
+            )])
+        buttons.append([InlineKeyboardButton("◀️ Back", callback_data=f"del:s:{series_slug[:40]}")])
+
+        await query.edit_message_text(
+            f"🗑️ <b>Delete {episode_key}</b>\n"
+            f"📺 {slug_to_title(series_slug)}\n"
+            f"📊 Qualities: {', '.join(sorted(quals))}\n\n"
+            f"What do you want to delete?",
+            parse_mode=pe.ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    elif data.startswith("del:x:"):
+        # Execute deletion of specific episode+quality
+        parts = data[6:].rsplit(":", 2)
+        series_slug = parts[0]
+        episode_key = parts[1]
+        quality = parts[2]  # "*" means all qualities
+
+        file_query = {"series_slug": series_slug, "episode_key": episode_key}
+        if quality != "*":
+            file_query["quality"] = quality
+
+        deleted = await db.files.delete_many(file_query)
+        await _refresh_album(db, library_manager, series_slug)
+
+        await query.edit_message_text(
+            f"✅ <b>Deleted!</b>\n"
+            f"🗑️ {deleted.deleted_count} file(s) removed\n"
+            f"📺 {episode_key} {'[' + quality + ']' if quality != '*' else '[all qualities]'}",
+            parse_mode=pe.ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ Back to series", callback_data=f"del:s:{series_slug[:40]}")],
+                [InlineKeyboardButton("🏠 Delete menu", callback_data="del:back")],
+            ]),
+        )
+
+    elif data.startswith("del:all:"):
+        # Confirm delete entire series
+        series_slug = data[8:]
+        count = await db.files.count_documents({"series_slug": series_slug})
+        title = slug_to_title(series_slug)
+
+        buttons = [
+            [InlineKeyboardButton(
+                f"⚠️ YES, DELETE ALL {count} FILES",
+                callback_data=f"del:confirm:{series_slug[:40]}",
+            )],
+            [InlineKeyboardButton("◀️ Cancel", callback_data=f"del:s:{series_slug[:40]}")],
+        ]
+
+        await query.edit_message_text(
+            f"⚠️ <b>Are you sure?</b>\n\n"
+            f"This will permanently delete:\n"
+            f"📺 {title}\n"
+            f"📁 {count} file(s)\n"
+            f"📨 Album post from channel\n\n"
+            f"<b>This cannot be undone!</b>",
+            parse_mode=pe.ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    elif data.startswith("del:confirm:"):
+        # Execute full series deletion
+        series_slug = data[12:]
+        deleted = await db.files.delete_many({"series_slug": series_slug})
+
+        if library_manager:
+            await library_manager.delete_album(series_slug)
+
+        await db.downloads.delete_many({"series_slug": series_slug})
+
+        await query.edit_message_text(
+            f"✅ <b>Series deleted permanently!</b>\n"
+            f"🗑️ {deleted.deleted_count} file(s) removed\n"
+            f"📨 Album removed from channel",
+            parse_mode=pe.ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 Delete menu", callback_data="del:back")],
+            ]),
+        )
+
+    elif data == "del:back":
+        # Back to series list — re-run the list
+        pipeline = [
+            {"$group": {
+                "_id": "$series_slug",
+                "title": {"$first": "$series_title"},
+                "count": {"$sum": 1},
+            }},
+            {"$sort": {"title": 1}},
+        ]
+        series_list = await db.files.aggregate(pipeline).to_list(length=100)
+
+        if not series_list:
+            await query.edit_message_text("📂 Library is empty — nothing to delete.")
+            return
+
+        buttons = []
+        for s in series_list:
+            slug = s["_id"]
+            title = s.get("title") or slug_to_title(slug)
+            count = s["count"]
+            buttons.append([InlineKeyboardButton(
+                f"📺 {title} ({count} files)",
+                callback_data=f"del:s:{slug[:40]}",
+            )])
+
+        await query.edit_message_text(
+            "🗑️ <b>Delete Manager</b>\n\nSelect a series to manage:",
+            parse_mode=pe.ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+
+async def _refresh_album(db, library_manager, series_slug: str):
+    """After deletion, update or remove the album in main channel."""
+    remaining = await db.files.count_documents({"series_slug": series_slug})
+    if remaining == 0:
+        if library_manager:
+            await library_manager.delete_album(series_slug)
+    else:
+        if library_manager:
+            sample = await db.files.find_one({"series_slug": series_slug})
+            if sample:
+                await library_manager.save_to_library(
+                    series_slug=series_slug,
+                    series_title=sample.get("series_title", series_slug),
+                    quality=sample["quality"],
+                    episode_key=sample["episode_key"],
+                    file_id=sample["file_id"],
+                    file_unique_id=sample["file_unique_id"],
+                )

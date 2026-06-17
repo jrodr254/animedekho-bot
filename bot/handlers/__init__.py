@@ -7,7 +7,7 @@ from .messages import handle_text
 from .admin import (
     cmd_adduser, cmd_removeuser, cmd_users,
     cmd_setchannellink,
-    cmd_delete,
+    cmd_delete, delete_callback,
 )
 
 __all__ = [
@@ -31,6 +31,9 @@ def register_handlers(app: Client):
     app.add_handler(MessageHandler(cmd_users, filters.command("users") & filters.private))
     app.add_handler(MessageHandler(cmd_setchannellink, filters.command("setchannellink") & filters.private))
     app.add_handler(MessageHandler(cmd_delete, filters.command("delete") & filters.private))
+
+    # Delete callbacks (owner-only, before general router)
+    app.add_handler(CallbackQueryHandler(delete_callback, filters.regex(r"^del:")))
 
     # Callback queries (inline buttons)
     app.add_handler(CallbackQueryHandler(callback_router))

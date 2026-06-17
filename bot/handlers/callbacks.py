@@ -156,45 +156,21 @@ async def _handle_series_detail(client: Client, q: CallbackQuery, slug: str):
 async def _handle_movie_detail(client: Client, q: CallbackQuery, slug: str):
     movie = await api.get_movie(slug)
 
-    # Resolve servers
-    resolved = await api.resolve_all_servers(movie.servers)
-    movie.servers = resolved
-
-    # Populate qualities for servers with player URLs
-    await _populate_server_qualities(resolved)
-
-    # Log resolution
-    if bot.logger.bot_logger:
-        for srv in movie.servers:
-            await bot.logger.bot_logger.log_server_resolve(movie.title, srv.name, srv.is_available)
-
-    # Collect all unique qualities across ALL servers
-    all_qualities: set[str] = set()
-    for srv in resolved:
-        for sq in srv.qualities:
-            all_qualities.add(sq.resolution)
-        if srv.direct_url:
-            all_qualities.add("auto")
+    # Skeleton: show default quality buttons instantly, resolve on download
+    from config.settings import settings
+    default_qualities = set(settings.site.default_qualities)
 
     text = f"🎬 <b>{esc(movie.title)}</b>\n\n"
     if movie.genres:
         text += f"🏷 {', '.join(movie.genres[:6])}\n"
     if movie.description:
         text += f"\n{esc(truncate(movie.description, 350))}\n"
+    text += "\n📊 <b>Select quality to download:</b>"
 
-    if all_qualities:
-        sorted_q = _sort_qualities(all_qualities)
-        text += f"\n📊 <b>Available Qualities:</b> {', '.join(sorted_q)}\n"
-        text += "\nSelect a quality to download:"
-    elif resolved:
-        text += "\n📥 Tap download to start:"
-    else:
-        text += "\n⚠️ No direct servers found — use 'Watch on Site'."
+    # Store raw servers — will be resolved on download
+    _store_servers(q.message.chat.id, f"movie:{slug}", movie.servers, movie.title)
 
-    # Store for download callbacks
-    _store_servers(q.message.chat.id, f"movie:{slug}", resolved, movie.title)
-
-    markup = kb.quality_picker(all_qualities, slug, "mp:1", is_movie=True)
+    markup = kb.quality_picker(default_qualities, slug, "mp:1", is_movie=True)
 
     if movie.poster:
         try:
@@ -233,49 +209,23 @@ async def _handle_season(q: CallbackQuery, slug: str, season: int):
 
 
 async def _handle_episode(q: CallbackQuery, ep_slug: str):
+    """Show episode with skeleton quality buttons instantly — no server resolution."""
     episode = await api.get_episode(ep_slug)
 
-    # Resolve all servers
-    resolved = await api.resolve_all_servers(episode.servers)
-
-    # Populate qualities for resolved servers
-    await _populate_server_qualities(resolved)
-
-    # Collect all unique qualities across ALL servers
-    all_qualities = set()
-    for srv in resolved:
-        for sq in srv.qualities:
-            all_qualities.add(sq.resolution)
-        if srv.direct_url:
-            all_qualities.add("auto")
-
-    # Log
-    if bot.logger.bot_logger:
-        for srv in resolved:
-            await bot.logger.bot_logger.log_server_resolve(
-                episode.title or ep_slug, srv.name, srv.is_available
-            )
+    # Show default quality buttons immediately (like YouTube skeleton)
+    from config.settings import settings
+    default_qualities = set(settings.site.default_qualities)  # ["480p", "720p", "1080p"]
 
     text = f"▶️ <b>{esc(episode.title)}</b>\n\n"
-
-    if all_qualities:
-        sorted_q = _sort_qualities(all_qualities)
-        text += f"📊 <b>Available Qualities:</b> {', '.join(sorted_q)}\n\n"
-        text += "Select a quality to download:"
-    elif resolved:
-        text += "📥 Tap download to start:"
-    else:
-        text += "⚠️ Could not extract servers. Use 'Watch on Site'.\n"
-        if bot.logger.bot_logger:
-            await bot.logger.bot_logger.log_error("episode_resolve", f"No servers for {ep_slug}")
+    text += "📊 <b>Select quality to download:</b>"
 
     series_slug = extract_series_slug(ep_slug)
     back_cb = f"sr:{short_slug(series_slug)}" if series_slug else "rp:1"
 
-    # Store resolved servers for download callbacks
-    _store_servers(q.message.chat.id, ep_slug, resolved, episode.title)
+    # Store raw (unresolved) servers — will be resolved on download
+    _store_servers(q.message.chat.id, ep_slug, episode.servers, episode.title)
 
-    markup = kb.quality_picker(all_qualities, ep_slug, back_cb, is_movie=False)
+    markup = kb.quality_picker(default_qualities, ep_slug, back_cb, is_movie=False)
 
     try:
         await q.edit_message_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=markup)
@@ -287,18 +237,15 @@ async def _handle_episode(q: CallbackQuery, ep_slug: str):
 
 
 async def _handle_download(client: Client, q: CallbackQuery, quality_pref: str, ep_slug: str):
-    """Handle single episode download — auto-picks server."""
+    """Handle single episode download — resolves VidStream only, fallback if broken."""
     chat_id = q.message.chat.id
     user = q.from_user
 
-    # Get stored server data or re-resolve
+    # Get stored server data (may be raw/unresolved from skeleton episode view)
     data = _get_servers(chat_id, ep_slug)
     if not data:
-        await _safe_edit(q, "⏳ Resolving servers...")
         episode = await api.get_episode(ep_slug)
-        resolved = await api.resolve_all_servers(episode.servers)
-        await _populate_server_qualities(resolved)
-        _store_servers(chat_id, ep_slug, resolved, episode.title)
+        _store_servers(chat_id, ep_slug, episode.servers, episode.title)
         data = _get_servers(chat_id, ep_slug)
 
     if not data or not data["servers"]:
@@ -306,10 +253,14 @@ async def _handle_download(client: Client, q: CallbackQuery, quality_pref: str, 
         return
 
     title = data.get("title", ep_slug)
-    all_servers = data["servers"]
+    raw_servers = data["servers"]
 
-    # Auto-find the quality across all servers
-    quality = _find_quality_match(all_servers, quality_pref)
+    # Lazy resolve: VidStream first, fallback only if it fails
+    resolved = await _lazy_resolve_servers(raw_servers)
+    if resolved:
+        _store_servers(chat_id, ep_slug, resolved, title)
+
+    quality = _find_quality_match(resolved or raw_servers, quality_pref)
 
     if not quality:
         await _safe_edit(q, "⚠️ No downloadable URL found on any server.")
@@ -336,14 +287,21 @@ async def _handle_download(client: Client, q: CallbackQuery, quality_pref: str, 
         cached_fid = await db.get_cached_file(series_slug, quality.resolution, episode_key)
         if cached_fid:
             try:
-                await q.message.reply_video(
-                    video=cached_fid,
-                    caption=f"📦 <b>{esc(title)}</b> [{quality.resolution}]\n<i>From library — no download needed!</i>",
+                await q.message.reply_document(
+                    document=cached_fid,
+                    file_name=filename,
+                    caption=f"📦 <b>{esc(title)}</b> [{quality.resolution}]\n<i>⚡ From library — instant delivery!</i>",
                     parse_mode=enums.ParseMode.HTML,
                 )
                 return
             except Exception as e:
-                log.warning("Cached file send failed, will re-download: %s", e)
+                log.warning("Cached file expired/deleted, removing from DB and re-downloading: %s", e)
+                # Remove invalid cache entry so it gets re-downloaded
+                await db.files.delete_one({
+                    "series_slug": series_slug,
+                    "quality": quality.resolution,
+                    "episode_key": episode_key,
+                })
 
     # Get poster from cache
     poster_url = _poster_cache.get(series_slug, "") if series_slug else ""
@@ -375,18 +333,14 @@ async def _handle_download(client: Client, q: CallbackQuery, quality_pref: str, 
 
 
 async def _handle_movie_download(client: Client, q: CallbackQuery, quality_pref: str, movie_slug: str):
-    """Handle movie download — auto-picks server."""
+    """Handle movie download — resolves VidStream only, fallback if broken."""
     chat_id = q.message.chat.id
     user = q.from_user
 
-    # Get stored server data or re-resolve
     data = _get_servers(chat_id, f"movie:{movie_slug}")
     if not data:
-        await _safe_edit(q, "⏳ Resolving servers...")
         movie = await api.get_movie(movie_slug)
-        resolved = await api.resolve_all_servers(movie.servers)
-        await _populate_server_qualities(resolved)
-        _store_servers(chat_id, f"movie:{movie_slug}", resolved, movie.title)
+        _store_servers(chat_id, f"movie:{movie_slug}", movie.servers, movie.title)
         data = _get_servers(chat_id, f"movie:{movie_slug}")
 
     if not data or not data["servers"]:
@@ -394,10 +348,13 @@ async def _handle_movie_download(client: Client, q: CallbackQuery, quality_pref:
         return
 
     title = data.get("title", slug_to_title(movie_slug))
-    all_servers = data["servers"]
+    raw_servers = data["servers"]
 
-    # Auto-find the quality across all servers
-    quality = _find_quality_match(all_servers, quality_pref)
+    resolved = await _lazy_resolve_servers(raw_servers)
+    if resolved:
+        _store_servers(chat_id, f"movie:{movie_slug}", resolved, title)
+
+    quality = _find_quality_match(resolved or raw_servers, quality_pref)
 
     if not quality:
         await _safe_edit(q, "⚠️ No downloadable URL found on any server.")
@@ -411,14 +368,20 @@ async def _handle_movie_download(client: Client, q: CallbackQuery, quality_pref:
         cached_fid = await db.get_cached_file(movie_slug, quality.resolution, "movie")
         if cached_fid:
             try:
-                await q.message.reply_video(
-                    video=cached_fid,
-                    caption=f"📦 <b>{esc(title)}</b> [{quality.resolution}]\n<i>From library — no download needed!</i>",
+                await q.message.reply_document(
+                    document=cached_fid,
+                    file_name=filename,
+                    caption=f"📦 <b>{esc(title)}</b> [{quality.resolution}]\n<i>⚡ From library — instant delivery!</i>",
                     parse_mode=enums.ParseMode.HTML,
                 )
                 return
             except Exception as e:
-                log.warning("Cached movie file send failed, will re-download: %s", e)
+                log.warning("Cached movie file expired/deleted, removing from DB: %s", e)
+                await db.files.delete_one({
+                    "series_slug": movie_slug,
+                    "quality": quality.resolution,
+                    "episode_key": "movie",
+                })
 
     if bot.logger.bot_logger:
         await bot.logger.bot_logger.log_download_start(
@@ -492,41 +455,50 @@ async def _do_batch_download(client: Client, chat_id, series, season, episodes, 
     """Execute batch download sequentially."""
     total = len(episodes)
     completed = 0
+    skipped = 0  # Episodes served from cache
+    sent_messages = [progress_msg]  # Track all messages for auto-delete
 
     for i, ep in enumerate(episodes, 1):
         try:
+            cache_info = f"\n⚡ {skipped} from library" if skipped > 0 else ""
             await progress_msg.edit_text(
                 f"📦 <b>Batch Download</b> — {esc(series.title)} S{season}\n\n"
-                f"📥 Downloading S{season}E{ep.number}... ({i}/{total})\n"
-                f"✅ {completed} completed",
+                f"📥 Processing S{season}E{ep.number}... ({i}/{total})\n"
+                f"✅ {completed} completed{cache_info}",
                 parse_mode=enums.ParseMode.HTML,
             )
         except Exception:
             pass
 
         try:
-            # ── Check cache first ──
+            # ── Check cache first — skip already downloaded episodes ──
             ep_key = f"S{season}E{ep.number:02d}"
             from bot.database import db
             if db:
                 cached_fid = await db.get_cached_file(series.slug, quality_pref, ep_key)
                 if cached_fid:
                     try:
-                        await client.send_video(
+                        await client.send_document(
                             chat_id,
-                            video=cached_fid,
-                            caption=f"📦 <b>{esc(series.title)} {ep_key}</b> [{quality_pref}]\n<i>From library</i>",
+                            document=cached_fid,
+                            file_name=make_episode_filename(series.title, season, ep.number, quality_pref),
+                            caption=f"📦 <b>{esc(series.title)} {ep_key}</b> [{quality_pref}]\n<i>⚡ From library — instant!</i>",
                             parse_mode=enums.ParseMode.HTML,
                         )
                         completed += 1
+                        skipped += 1
                         continue
                     except Exception:
-                        pass  # Cache miss or file expired, download normally
+                        # Expired file — remove from cache
+                        await db.files.delete_one({
+                            "series_slug": series.slug,
+                            "quality": quality_pref,
+                            "episode_key": ep_key,
+                        })
 
-            # Resolve episode
+            # Resolve episode (lazy — VidStream first)
             episode = await api.get_episode(ep.slug)
-            resolved = await api.resolve_all_servers(episode.servers)
-            await _populate_server_qualities(resolved)
+            resolved = await _lazy_resolve_servers(episode.servers)
 
             if not resolved:
                 log.warning("No servers for batch ep %s", ep.slug)
@@ -546,6 +518,7 @@ async def _do_batch_download(client: Client, chat_id, series, season, episodes, 
                 f"📥 <b>Downloading:</b> S{season}E{ep.number} [{quality.resolution}]",
                 parse_mode=enums.ParseMode.HTML,
             )
+            sent_messages.append(ep_msg)
 
             success, sent_msg = await download_and_upload(
                 chat_id, quality.master_url or quality.url, quality.resolution, filename,
@@ -627,11 +600,16 @@ async def _do_batch_download(client: Client, chat_id, series, season, episodes, 
         await asyncio.sleep(2)
 
     # Final summary
+    cache_info = f"\n⚡ {skipped} served from library (instant)" if skipped > 0 else ""
+    downloaded = completed - skipped
     try:
         await progress_msg.edit_text(
-            f"{'✅' if completed == total else '⚠️'} <b>Batch complete!</b>\n"
-            f"📺 {esc(series.title)} — Season {season}\n"
-            f"✅ {completed}/{total} episodes uploaded.",
+            f"{'✅' if completed == total else '⚠️'} <b>Batch Complete!</b>\n"
+            f"┌ 📺 {esc(series.title)} — Season {season}\n"
+            f"├ ✅ {completed}/{total} episodes delivered\n"
+            f"{'├ 📥 ' + str(downloaded) + ' freshly downloaded' + chr(10) if downloaded > 0 else ''}"
+            f"{'├ ⚡ ' + str(skipped) + ' from library (instant)' + chr(10) if skipped > 0 else ''}"
+            f"└ 🗑️ This message will auto-delete in 12h",
             parse_mode=enums.ParseMode.HTML,
         )
     except Exception:
@@ -639,6 +617,9 @@ async def _do_batch_download(client: Client, chat_id, series, season, episodes, 
 
     if bot.logger.bot_logger:
         await bot.logger.bot_logger.log_batch_complete(series.title, season, completed, total)
+
+    # Auto-delete all bot messages after 12 hours (43200 seconds)
+    asyncio.create_task(_auto_delete_messages(client, chat_id, sent_messages, 43200))
 
 
 async def _do_download(client: Client, chat_id, quality, filename, title, progress_msg, user,
@@ -704,6 +685,13 @@ async def _do_download(client: Client, chat_id, quality, filename, title, progre
 
         elif not success and bot.logger.bot_logger:
             await bot.logger.bot_logger.log_download_error(title, "Download/upload failed")
+
+        # Auto-delete progress + file messages after 12h
+        to_delete = [progress_msg]
+        if sent_msg:
+            to_delete.append(sent_msg)
+        asyncio.create_task(_auto_delete_messages(client, chat_id, to_delete, 43200))
+
     except Exception as e:
         log.exception("Download task error for %s", title)
         if bot.logger.bot_logger:
@@ -744,18 +732,54 @@ def _sort_qualities(qualities: set[str]) -> list[str]:
     return sorted(qualities, key=lambda q: order.get(q, 99))
 
 
-async def _populate_server_qualities(servers: list):
-    """Extract stream URLs and qualities using the resolver.
+async def _lazy_resolve_servers(servers: list) -> list:
+    """Resolve servers lazily: VidStream ONLY, fallback to next only if it fails.
     
-    Priority: VidStream first. Only falls back to HydraX (then Vidmoly)
-    if VidStream completely fails (no stream at all).
+    Like YouTube — show buttons instantly, resolve the stream only when
+    the user actually clicks download. Try VidStream first since it always
+    has all qualities (480p/720p/1080p). Only try HydraX/Vidmoly if
+    VidStream completely fails.
+    
+    Returns the server list with the resolved server populated.
+    """
+    from config.settings import settings
+    preferred = settings.site.preferred_servers
+
+    def _server_priority(srv):
+        name_lower = srv.name.lower()
+        for i, pref in enumerate(preferred):
+            if pref.lower() in name_lower:
+                return i
+        return len(preferred)
+
+    # First resolve the raw servers (get player URLs)
+    sorted_servers = sorted(servers, key=_server_priority)
+    
+    # Check if any server is already resolved with qualities
+    for srv in sorted_servers:
+        if srv.qualities and any(q.resolution != "auto" for q in srv.qualities):
+            return sorted_servers
+
+    # Need to resolve: first get player URLs if not already done
+    needs_resolve = [s for s in sorted_servers if not s.player_url and not s.direct_url]
+    if needs_resolve:
+        resolved_list = await api.resolve_all_servers(servers)
+        sorted_servers = sorted(resolved_list, key=_server_priority)
+
+    # Now try to extract stream from each server in priority order
+    await _populate_server_qualities(sorted_servers)
+    return sorted_servers
+
+
+async def _populate_server_qualities(servers: list):
+    """Extract stream URLs and qualities from servers in priority order.
+    
+    Stops at the FIRST server that works. No scanning all servers.
     """
     from extractors.resolver import resolve_player_url
     from config.settings import settings
+    preferred = settings.site.preferred_servers
 
-    preferred = settings.site.preferred_servers  # ["VidStream", "HydraX", "Vidmoly"]
-
-    # Sort servers by priority: preferred servers first, in order
     def _server_priority(srv):
         name_lower = srv.name.lower()
         for i, pref in enumerate(preferred):
@@ -777,10 +801,10 @@ async def _populate_server_qualities(servers: list):
             if result:
                 if result.get("qualities"):
                     srv.qualities = result["qualities"]
-                    log.info("Resolver found %d qualities on %s: %s",
-                             len(srv.qualities), srv.name,
+                    log.info("✅ %s: %d qualities (%s)",
+                             srv.name, len(srv.qualities),
                              ", ".join(q.resolution for q in srv.qualities))
-                    return  # Use this server — don't check others
+                    return  # Done — don't check others
                 elif result.get("url"):
                     vtype = result.get("type", "mp4")
                     srv.direct_url = result["url"]
@@ -790,12 +814,12 @@ async def _populate_server_qualities(servers: list):
                         url=result["url"],
                         label=f"Auto ({vtype.upper()})"
                     )]
-                    log.info("Server %s resolved with 'auto' quality, using it.", srv.name)
-                    return  # Use this server — don't check others
+                    log.info("✅ %s: auto quality", srv.name)
+                    return
         except Exception as e:
             log.debug("Resolver failed for %s: %s", srv.name, e)
 
-        log.info("Server %s: failed to resolve, trying next...", srv.name)
+        log.info("❌ %s: failed, trying next...", srv.name)
 
 
 def _pick_quality(srv, quality_idx: int):
@@ -928,3 +952,13 @@ async def _safe_edit(q: CallbackQuery, text: str, markup=None):
         await q.edit_message_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=markup)
     except Exception:
         await q.message.reply_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=markup)
+
+
+async def _auto_delete_messages(client: Client, chat_id: int, messages: list, delay_seconds: int = 43200):
+    """Auto-delete a list of bot messages after delay (default 12h)."""
+    await asyncio.sleep(delay_seconds)
+    for msg in messages:
+        try:
+            await client.delete_messages(chat_id, msg.id)
+        except Exception:
+            pass
