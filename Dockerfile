@@ -6,11 +6,13 @@ RUN apt-get update && \
     ffmpeg \
     curl \
     ca-certificates \
-    libicu-dev \
-    bsdutils \
+    python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install N_m3u8DL-RE binary (auto-detect architecture)
+# Install yt-dlp (works on all architectures, handles HLS master playlists)
+RUN pip install --no-cache-dir --break-system-packages yt-dlp
+
+# Install N_m3u8DL-RE binary (optional, yt-dlp is primary)
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
       URL="https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.5.1-beta/N_m3u8DL-RE_v0.5.1-beta_linux-arm64_20251029.tar.gz"; \
@@ -20,7 +22,7 @@ RUN ARCH=$(dpkg --print-architecture) && \
     curl -L -o /tmp/N_m3u8DL-RE.tar.gz "$URL" && \
     tar -xzf /tmp/N_m3u8DL-RE.tar.gz -C /usr/local/bin/ && \
     rm /tmp/N_m3u8DL-RE.tar.gz && \
-    chmod +x /usr/local/bin/N_m3u8DL-RE
+    chmod +x /usr/local/bin/N_m3u8DL-RE || true
 
 
 # Set working directory
