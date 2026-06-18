@@ -3,15 +3,47 @@
 from __future__ import annotations
 import asyncio
 import logging
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 
+import aiohttp
 from pyrogram import Client, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from bot.database import Database
 
 log = logging.getLogger(__name__)
+
+
+async def _download_poster(url: str) -> str | None:
+    """Download poster image to a temp file, return path or None."""
+    if not url:
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    log.warning("Poster download failed: HTTP %d for %s", resp.status, url[:80])
+                    return None
+                ct = resp.content_type or ""
+                ext = ".jpg"
+                if "png" in ct:
+                    ext = ".png"
+                elif "webp" in ct:
+                    ext = ".webp"
+                data = await resp.read()
+                if len(data) < 1000:
+                    log.warning("Poster too small (%d bytes), skipping", len(data))
+                    return None
+                tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False, dir=tempfile.gettempdir())
+                tmp.write(data)
+                tmp.close()
+                return tmp.name
+    except Exception as e:
+        log.warning("Poster download error: %s", e)
+        return None
 
 CAPTION_LIMIT = 1024
 
@@ -168,18 +200,22 @@ class LibraryManager:
         # Create new album message
         try:
             has_poster = False
+            poster_path = None
             if poster_url:
+                poster_path = await _download_poster(poster_url)
+
+            if poster_path:
                 try:
                     msg = await self.client.send_photo(
                         chat_id=self.channel,
-                        photo=poster_url,
+                        photo=poster_path,
                         caption=caption[:CAPTION_LIMIT],
                         parse_mode=enums.ParseMode.HTML,
                         reply_markup=markup,
                     )
                     has_poster = True
                 except Exception as e:
-                    log.warning("Failed to send poster, sending text: %s", e)
+                    log.warning("Failed to send poster photo, sending text: %s", e)
                     msg = await self.client.send_message(
                         chat_id=self.channel,
                         text=caption[:CAPTION_LIMIT],
@@ -187,7 +223,14 @@ class LibraryManager:
                         disable_web_page_preview=True,
                         reply_markup=markup,
                     )
+                finally:
+                    try:
+                        os.remove(poster_path)
+                    except Exception:
+                        pass
             else:
+                if poster_url:
+                    log.warning("Poster URL exists but download failed: %s", poster_url[:100])
                 msg = await self.client.send_message(
                     chat_id=self.channel,
                     text=caption[:CAPTION_LIMIT],
