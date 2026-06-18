@@ -197,6 +197,7 @@ async def ytdlp_download(
     title: str = "video",
 ) -> bool:
     """Download HLS stream using yt-dlp. Handles master m3u8 natively."""
+    log.info("yt-dlp download: url=%s quality=%s", stream_url[:120], quality)
     last_edit = [0.0]
     start_time = time.time()
 
@@ -227,7 +228,6 @@ async def ytdlp_download(
     ]
 
     if height:
-        # Select specific quality + ALL audio tracks
         cmd.extend(["-f", f"bv*[height={height}]+ba*/bv*[height<={height}]+ba*/b"])
     else:
         cmd.extend(["-f", "bv*+ba*/b"])
@@ -513,6 +513,116 @@ async def n_m3u8dl_re_download(
     return success
 
 
+# ── ffmpeg direct (for multi-audio HLS) ──────────────────────────────
+
+
+async def ffmpeg_hls_download(
+    stream_url: str,
+    quality: str,
+    output_path: str,
+    progress_msg: Message | None = None,
+    title: str = "video",
+) -> bool:
+    """Download HLS using ffmpeg directly — maps ALL audio tracks."""
+    if not shutil.which("ffmpeg"):
+        log.warning("ffmpeg not found")
+        return False
+
+    log.info("ffmpeg download: url=%s quality=%s", stream_url[:120], quality)
+    last_edit = [0.0]
+    start_time = time.time()
+
+    origin = _get_origin(stream_url)
+
+    # For master m3u8: use -map 0:v:0 (first/best video) + -map 0:a (ALL audio)
+    # ffmpeg auto-selects best video from master playlist variants
+    cmd = [
+        "ffmpeg", "-y",
+        "-headers", f"Referer: {origin}/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n",
+        "-i", stream_url,
+        "-map", "0:v:0",    # First video stream (highest quality from master)
+        "-map", "0:a?",     # ALL audio tracks (? = don't fail if none)
+        "-c", "copy",       # No re-encoding, just remux
+        "-movflags", "+faststart",
+        output_path,
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    _dl_state = {"pct": 0.0, "size": 0, "speed": 0.0}
+
+    async def _read_output():
+        """Drain ffmpeg output to prevent pipe blocking."""
+        while True:
+            chunk = await proc.stdout.read(4096)
+            if not chunk:
+                break
+            # ffmpeg progress parsing (time=HH:MM:SS.xx)
+            text = chunk.decode(errors="replace")
+            m = re.search(r'time=(\d+):(\d+):(\d+)', text)
+            if m:
+                h, mn, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                secs = h * 3600 + mn * 60 + s
+                # Estimate % (assume 24min episode)
+                est_duration = 24 * 60
+                _dl_state["pct"] = min(99, secs / est_duration * 100)
+
+    async def _monitor():
+        last_disk_size = 0
+        last_disk_time = time.time()
+        while proc.returncode is None:
+            await asyncio.sleep(3)
+            try:
+                disk_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+                _dl_state["size"] = disk_size
+
+                now = time.time()
+                dt = now - last_disk_time
+                if dt > 1 and disk_size > last_disk_size:
+                    _dl_state["speed"] = (disk_size - last_disk_size) / dt
+                last_disk_size = disk_size
+                last_disk_time = now
+
+                if _dl_state["pct"] == 0 and disk_size > 0:
+                    est = {"1080p": 400, "720p": 200, "480p": 100}.get(quality, 200) * 1024 * 1024
+                    _dl_state["pct"] = min(95, disk_size / est * 100)
+
+                elapsed = time.time() - start_time
+                if progress_msg and disk_size > 100_000:
+                    await _update_progress(progress_msg,
+                        _download_progress_text(
+                            title, quality, _dl_state["pct"],
+                            disk_size, elapsed, _dl_state["speed"], "", "ffmpeg"),
+                        last_edit, interval=3.0)
+            except Exception:
+                pass
+
+    read_task = asyncio.create_task(_read_output())
+    monitor_task = asyncio.create_task(_monitor())
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=2400)
+    except asyncio.TimeoutError:
+        proc.kill()
+        log.error("ffmpeg timed out")
+        return False
+    finally:
+        for t in (read_task, monitor_task):
+            t.cancel()
+            try: await t
+            except asyncio.CancelledError: pass
+
+    if proc.returncode != 0:
+        log.error("ffmpeg failed (%d)", proc.returncode)
+        return False
+
+    return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+
+
 # ── Main download + upload ────────────────────────────────────────────
 
 
@@ -535,24 +645,29 @@ async def download_and_upload(
         is_m3u8 = ".m3u8" in stream_url.lower()
 
         if is_m3u8:
-            if IS_ARM:
-                # ARM64: yt-dlp primary, N_m3u8DL-RE fallback
-                log.info("ARM64 detected — using yt-dlp as primary for %s", title[:50])
-                success = await ytdlp_download(
-                    stream_url, quality, output_path, progress_msg, title)
-                if not success:
-                    log.info("yt-dlp failed, trying N_m3u8DL-RE fallback for %s", title[:50])
-                    success = await n_m3u8dl_re_download(
-                        stream_url, quality, output_path, progress_msg, title)
-            else:
-                # x86_64/AMD64: N_m3u8DL-RE primary, yt-dlp fallback
-                log.info("x86_64 detected — using N_m3u8DL-RE as primary for %s", title[:50])
-                success = await n_m3u8dl_re_download(
-                    stream_url, quality, output_path, progress_msg, title)
-                if not success:
-                    log.info("N_m3u8DL-RE failed, trying yt-dlp fallback for %s", title[:50])
+            # 1. Try ffmpeg first — reliably grabs ALL audio tracks
+            log.info("Trying ffmpeg (multi-audio) for %s", title[:50])
+            success = await ffmpeg_hls_download(
+                stream_url, quality, output_path, progress_msg, title)
+
+            # 2. Architecture-based fallback
+            if not success:
+                if IS_ARM:
+                    log.info("ffmpeg failed, trying yt-dlp (ARM64) for %s", title[:50])
                     success = await ytdlp_download(
                         stream_url, quality, output_path, progress_msg, title)
+                    if not success:
+                        log.info("yt-dlp failed, trying N_m3u8DL-RE for %s", title[:50])
+                        success = await n_m3u8dl_re_download(
+                            stream_url, quality, output_path, progress_msg, title)
+                else:
+                    log.info("ffmpeg failed, trying N_m3u8DL-RE (x86) for %s", title[:50])
+                    success = await n_m3u8dl_re_download(
+                        stream_url, quality, output_path, progress_msg, title)
+                    if not success:
+                        log.info("N_m3u8DL-RE failed, trying yt-dlp for %s", title[:50])
+                        success = await ytdlp_download(
+                            stream_url, quality, output_path, progress_msg, title)
 
             if not success:
                 log.error("All download methods failed for %s", title)
