@@ -283,19 +283,37 @@ async def ytdlp_download(
                 _dl_state["eta"] = m.group(1)
 
     async def _monitor():
+        last_disk_size = 0
+        last_disk_time = time.time()
         while proc.returncode is None:
             await asyncio.sleep(3)
             try:
-                # Also check file size on disk as backup
-                if _dl_state["size"] == 0:
-                    if os.path.exists(output_path):
-                        _dl_state["size"] = os.path.getsize(output_path)
-                    else:
-                        stem = Path(output_path).stem
-                        _dl_state["size"] = sum(
-                            f.stat().st_size for f in _TEMP_DIR.glob("**/*")
-                            if f.is_file() and stem in f.name
-                        )
+                # Always track actual file size on disk
+                disk_size = 0
+                if os.path.exists(output_path):
+                    disk_size = os.path.getsize(output_path)
+                if disk_size == 0:
+                    stem = Path(output_path).stem
+                    disk_size = sum(
+                        f.stat().st_size for f in _TEMP_DIR.glob("**/*")
+                        if f.is_file() and (stem in f.name or f.suffix in (".part", ".mp4", ".ts", ".m4s"))
+                    )
+
+                # Use disk size as authoritative size
+                _dl_state["size"] = max(_dl_state["size"], disk_size)
+
+                # Calculate speed from disk size changes if yt-dlp didn't report it
+                now = time.time()
+                dt = now - last_disk_time
+                if dt > 1 and _dl_state["speed"] == 0 and disk_size > last_disk_size:
+                    _dl_state["speed"] = (disk_size - last_disk_size) / dt
+                last_disk_size = disk_size
+                last_disk_time = now
+
+                # If yt-dlp didn't give us %, estimate from file size
+                if _dl_state["pct"] == 0 and disk_size > 0:
+                    est_total = {"1080p": 400, "720p": 200, "480p": 100, "360p": 60, "240p": 30}.get(quality, 200) * 1024 * 1024
+                    _dl_state["pct"] = min(95.0, disk_size / est_total * 100)
 
                 elapsed = time.time() - start_time
                 if progress_msg:
