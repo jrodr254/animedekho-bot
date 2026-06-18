@@ -233,7 +233,8 @@ async def ytdlp_download(
     _dl_state = {"pct": 0.0, "size": 0, "speed": 0.0, "eta": ""}
 
     async def _read_output():
-        """Parse yt-dlp stdout for real progress info."""
+        """Parse yt-dlp stdout for real progress info.
+        yt-dlp uses \\r for progress lines, so we read chunks not lines."""
         pct_re = re.compile(r'(\d+(?:\.\d+)?)%')
         size_re = re.compile(r'of\s+~?\s*([\d.]+)(Ki?B|Mi?B|Gi?B)')
         speed_re = re.compile(r'at\s+([\d.]+)(Ki?B|Mi?B|Gi?B)/s')
@@ -241,49 +242,52 @@ async def ytdlp_download(
         frag_re = re.compile(r'fragment\s+(\d+)/(\d+)')
 
         while True:
-            line = await proc.stdout.readline()
-            if not line:
+            chunk = await proc.stdout.read(4096)
+            if not chunk:
                 break
-            text = line.decode(errors="replace").strip()
-            if not text:
-                continue
+            text = chunk.decode(errors="replace")
+            # Split on both \r and \n
+            for line in re.split(r'[\r\n]+', text):
+                line = line.strip()
+                if not line:
+                    continue
 
-            # Parse percentage
-            m = pct_re.search(text)
-            if m:
-                _dl_state["pct"] = min(99.0, float(m.group(1)))
+                # Parse percentage
+                m = pct_re.search(line)
+                if m:
+                    _dl_state["pct"] = min(99.0, float(m.group(1)))
 
-            # Parse fragment progress (for HLS)
-            m = frag_re.search(text)
-            if m:
-                done, total = int(m.group(1)), int(m.group(2))
-                if total > 0:
-                    _dl_state["pct"] = min(99.0, done / total * 100)
+                # Parse fragment progress (for HLS)
+                m = frag_re.search(line)
+                if m:
+                    done, total = int(m.group(1)), int(m.group(2))
+                    if total > 0:
+                        _dl_state["pct"] = min(99.0, done / total * 100)
 
-            # Parse total size
-            m = size_re.search(text)
-            if m:
-                val = float(m.group(1))
-                unit = m.group(2).upper()
-                if "G" in unit: val *= 1024**3
-                elif "M" in unit: val *= 1024**2
-                elif "K" in unit: val *= 1024
-                _dl_state["size"] = int(val)
+                # Parse total size
+                m = size_re.search(line)
+                if m:
+                    val = float(m.group(1))
+                    unit = m.group(2).upper()
+                    if "G" in unit: val *= 1024**3
+                    elif "M" in unit: val *= 1024**2
+                    elif "K" in unit: val *= 1024
+                    _dl_state["size"] = int(val)
 
-            # Parse speed
-            m = speed_re.search(text)
-            if m:
-                val = float(m.group(1))
-                unit = m.group(2).upper()
-                if "G" in unit: val *= 1024**3
-                elif "M" in unit: val *= 1024**2
-                elif "K" in unit: val *= 1024
-                _dl_state["speed"] = val
+                # Parse speed
+                m = speed_re.search(line)
+                if m:
+                    val = float(m.group(1))
+                    unit = m.group(2).upper()
+                    if "G" in unit: val *= 1024**3
+                    elif "M" in unit: val *= 1024**2
+                    elif "K" in unit: val *= 1024
+                    _dl_state["speed"] = val
 
-            # Parse ETA
-            m = eta_re.search(text)
-            if m:
-                _dl_state["eta"] = m.group(1)
+                # Parse ETA
+                m = eta_re.search(line)
+                if m:
+                    _dl_state["eta"] = m.group(1)
 
     _stall_detected = asyncio.Event()
     _STALL_TIMEOUT = 180  # Kill if no new data for 3 minutes (allows retries)
