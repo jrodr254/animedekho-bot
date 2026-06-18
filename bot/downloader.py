@@ -194,7 +194,7 @@ async def ytdlp_download(
 
     if progress_msg:
         await _update_progress(progress_msg,
-            _download_progress_text(title, quality, 0, 0, 0, "yt-dlp"), [0])
+            _download_progress_text(title, quality, 0, 0, 0, 0, "", "yt-dlp"), [0])
 
     origin = _get_origin(stream_url)
 
