@@ -44,19 +44,44 @@ def make_movie_filename(movie_title: str, quality: str) -> str:
 # ── Stylish Progress ──────────────────────────────────────────────────
 
 
-def _progress_bar(pct: float, width: int = 12) -> str:
-    filled = int(pct / 100 * width)
-    return "▓" * filled + "░" * (width - filled)
+_SPIN_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+_spin_idx = 0
+
+def _spinner() -> str:
+    global _spin_idx
+    _spin_idx = (_spin_idx + 1) % len(_SPIN_FRAMES)
+    return _SPIN_FRAMES[_spin_idx]
+
+
+def _progress_bar(pct: float, width: int = 20) -> str:
+    """Smooth animated progress bar with gradient fill."""
+    filled_exact = pct / 100 * width
+    filled = int(filled_exact)
+    # Sub-block characters for smooth partial fill
+    partials = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
+    partial_idx = int((filled_exact - filled) * len(partials))
+
+    if filled >= width:
+        return "█" * width
+    bar = "█" * filled
+    if partial_idx > 0:
+        bar += partials[partial_idx]
+        remaining = width - filled - 1
+    else:
+        remaining = width - filled
+    bar += "░" * remaining
+    return bar
 
 
 def _format_size(b: float) -> str:
-    if b >= 1024**3: return f"{b / 1024**3:.1f} GB"
+    if b >= 1024**3: return f"{b / 1024**3:.2f} GB"
     if b >= 1024**2: return f"{b / 1024**2:.1f} MB"
     if b >= 1024: return f"{b / 1024:.1f} KB"
     return f"{b:.0f} B"
 
 
 def _format_time(s: float) -> str:
+    if s < 0: return "∞"
     if s < 60: return f"{int(s)}s"
     if s < 3600: return f"{int(s // 60)}m {int(s % 60)}s"
     return f"{int(s // 3600)}h {int((s % 3600) // 60)}m"
@@ -68,38 +93,66 @@ def _format_speed(bps: float) -> str:
     return f"{bps:.0f} B/s"
 
 
-def _download_progress_text(title, quality, size_bytes, elapsed, speed, engine=""):
-    eng = f" ({engine})" if engine else ""
-    return (
-        f"📥 <b>Downloading{eng}</b>\n"
-        f"┌ 📺 {title}\n"
-        f"├ 🎬 Quality: {quality}\n"
-        f"├ 💾 Size: {_format_size(size_bytes)}\n"
-        f"├ ⚡ Speed: {_format_speed(speed) if speed > 0 else 'starting...'}\n"
-        f"├ ⏱ Elapsed: {_format_time(elapsed)}\n"
-        f"└ 🔄 In progress..."
-    )
+def _calc_eta(pct: float, elapsed: float) -> str:
+    """Calculate estimated time remaining."""
+    if pct <= 0 or elapsed <= 0:
+        return "calculating..."
+    remaining = elapsed / pct * (100 - pct)
+    return _format_time(remaining)
 
 
-def _upload_progress_text(title, quality, current, total):
+def _download_progress_text(title, quality, pct, size_bytes, elapsed, speed, eta="", engine=""):
+    eng = f" · {engine}" if engine else ""
+    spin = _spinner()
+    speed_str = _format_speed(speed) if speed > 0 else "⏳ starting..."
+    bar = _progress_bar(pct)
+    eta_str = eta or _calc_eta(pct, elapsed)
+
+    lines = [
+        f"{spin} <b>⬇️ Downloading{eng}</b>",
+        f"",
+        f"<b>{title}</b>",
+        f"🎬 {quality}",
+        f"",
+        f"<code>{bar}</code> <b>{pct:.1f}%</b>",
+        f"",
+        f"📦 {_format_size(size_bytes)}  ⚡ {speed_str}",
+        f"⏱ {_format_time(elapsed)}  ⏳ ETA: {eta_str}",
+    ]
+    return "\n".join(lines)
+
+
+def _upload_progress_text(title, quality, current, total, speed=0, elapsed=0):
     pct = current / total * 100 if total > 0 else 0
-    return (
-        f"📤 <b>Uploading to Telegram</b>\n"
-        f"┌ 📺 {title}\n"
-        f"├ 🎬 Quality: {quality}\n"
-        f"├ {_progress_bar(pct)} {pct:.0f}%\n"
-        f"├ 💾 {_format_size(current)} / {_format_size(total)}\n"
-        f"└ 🔄 Uploading via MTProto..."
-    )
+    spin = _spinner()
+    bar = _progress_bar(pct)
+    speed_str = _format_speed(speed) if speed > 0 else "⏳ starting..."
+    eta_str = _calc_eta(pct, elapsed) if pct > 0 and elapsed > 0 else "calculating..."
+
+    lines = [
+        f"{spin} <b>⬆️ Uploading to Telegram</b>",
+        f"",
+        f"<b>{title}</b>",
+        f"🎬 {quality}",
+        f"",
+        f"<code>{bar}</code> <b>{pct:.1f}%</b>",
+        f"",
+        f"📦 {_format_size(current)} / {_format_size(total)}",
+        f"⚡ {speed_str}  ⏳ ETA: {eta_str}",
+    ]
+    return "\n".join(lines)
 
 
 def _done_text(title, quality, size_bytes, elapsed):
+    bar = _progress_bar(100)
+    avg_speed = size_bytes / elapsed if elapsed > 0 else 0
     return (
-        f"✅ <b>Download Complete!</b>\n"
-        f"┌ 📺 {title}\n"
-        f"├ 🎬 Quality: {quality}\n"
-        f"├ 💾 Size: {_format_size(size_bytes)}\n"
-        f"└ ⏱ Time: {_format_time(elapsed)}"
+        f"✅ <b>Upload Complete!</b>\n\n"
+        f"<b>{title}</b>\n"
+        f"🎬 {quality}\n\n"
+        f"<code>{bar}</code> <b>100%</b>\n\n"
+        f"📦 {_format_size(size_bytes)}  ⚡ avg {_format_speed(avg_speed)}\n"
+        f"⏱ Total: {_format_time(elapsed)}"
     )
 
 
@@ -170,43 +223,105 @@ async def ytdlp_download(
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
 
+    # Track progress state parsed from yt-dlp output
+    _dl_state = {"pct": 0.0, "size": 0, "speed": 0.0, "eta": ""}
+
+    async def _read_output():
+        """Parse yt-dlp stdout for real progress info."""
+        pct_re = re.compile(r'(\d+(?:\.\d+)?)%')
+        size_re = re.compile(r'of\s+~?\s*([\d.]+)(Ki?B|Mi?B|Gi?B)')
+        speed_re = re.compile(r'at\s+([\d.]+)(Ki?B|Mi?B|Gi?B)/s')
+        eta_re = re.compile(r'ETA\s+(\S+)')
+        frag_re = re.compile(r'fragment\s+(\d+)/(\d+)')
+
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode(errors="replace").strip()
+            if not text:
+                continue
+
+            # Parse percentage
+            m = pct_re.search(text)
+            if m:
+                _dl_state["pct"] = min(99.0, float(m.group(1)))
+
+            # Parse fragment progress (for HLS)
+            m = frag_re.search(text)
+            if m:
+                done, total = int(m.group(1)), int(m.group(2))
+                if total > 0:
+                    _dl_state["pct"] = min(99.0, done / total * 100)
+
+            # Parse total size
+            m = size_re.search(text)
+            if m:
+                val = float(m.group(1))
+                unit = m.group(2).upper()
+                if "G" in unit: val *= 1024**3
+                elif "M" in unit: val *= 1024**2
+                elif "K" in unit: val *= 1024
+                _dl_state["size"] = int(val)
+
+            # Parse speed
+            m = speed_re.search(text)
+            if m:
+                val = float(m.group(1))
+                unit = m.group(2).upper()
+                if "G" in unit: val *= 1024**3
+                elif "M" in unit: val *= 1024**2
+                elif "K" in unit: val *= 1024
+                _dl_state["speed"] = val
+
+            # Parse ETA
+            m = eta_re.search(text)
+            if m:
+                _dl_state["eta"] = m.group(1)
+
     async def _monitor():
-        last_size = 0
         while proc.returncode is None:
-            await asyncio.sleep(4)
+            await asyncio.sleep(3)
             try:
-                if os.path.exists(output_path):
-                    size = os.path.getsize(output_path)
-                else:
-                    # Check for temp files yt-dlp creates
-                    size = sum(f.stat().st_size for f in _TEMP_DIR.glob("**/*")
-                               if f.is_file() and Path(output_path).stem in f.name)
+                # Also check file size on disk as backup
+                if _dl_state["size"] == 0:
+                    if os.path.exists(output_path):
+                        _dl_state["size"] = os.path.getsize(output_path)
+                    else:
+                        stem = Path(output_path).stem
+                        _dl_state["size"] = sum(
+                            f.stat().st_size for f in _TEMP_DIR.glob("**/*")
+                            if f.is_file() and stem in f.name
+                        )
+
                 elapsed = time.time() - start_time
-                speed = max(0, (size - last_size)) / 4
-                last_size = size
-                if progress_msg and size > 100_000:
+                if progress_msg:
                     await _update_progress(progress_msg,
-                        _download_progress_text(title, quality, size, elapsed, speed, "yt-dlp"),
-                        last_edit)
+                        _download_progress_text(
+                            title, quality, _dl_state["pct"],
+                            _dl_state["size"], elapsed,
+                            _dl_state["speed"], _dl_state["eta"], "yt-dlp"),
+                        last_edit, interval=3.0)
             except Exception:
                 pass
 
+    read_task = asyncio.create_task(_read_output())
     monitor_task = asyncio.create_task(_monitor())
 
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=2400)
+        await asyncio.wait_for(proc.wait(), timeout=2400)
     except asyncio.TimeoutError:
         proc.kill()
-        monitor_task.cancel()
         log.error("yt-dlp timed out for %s", stream_url[:60])
         return False
     finally:
-        monitor_task.cancel()
-        try: await monitor_task
-        except asyncio.CancelledError: pass
+        for t in (read_task, monitor_task):
+            t.cancel()
+            try: await t
+            except asyncio.CancelledError: pass
 
     if proc.returncode != 0:
         err = stderr.decode()[-300:] if stderr else "unknown"
@@ -284,19 +399,26 @@ async def n_m3u8dl_re_download(
 
     async def _monitor():
         last_size = 0
+        last_time = time.time()
         while proc.returncode is None:
-            await asyncio.sleep(4)
+            await asyncio.sleep(3)
             try:
                 total = sum(f.stat().st_size for f in Path(save_dir).glob("**/*")
                            if f.is_file() and (stem in f.name or f.suffix in (".ts", ".m4s", ".mp4")))
                 total += sum(f.stat().st_size for f in _SEGMENTS_DIR.glob("**/*") if f.is_file())
-                elapsed = time.time() - start_time
-                speed = max(0, (total - last_size)) / 4
+                now = time.time()
+                dt = now - last_time
+                speed = max(0, (total - last_size)) / dt if dt > 0 else 0
                 last_size = total
+                last_time = now
+                elapsed = now - start_time
+                # Estimate % from file size (rough for m3u8)
+                est_total = {"1080p": 400, "720p": 200, "480p": 100}.get(quality, 200) * 1024 * 1024
+                pct = min(95, total / est_total * 100) if est_total > 0 else 0
                 if progress_msg and total > 100_000:
                     await _update_progress(progress_msg,
-                        _download_progress_text(title, quality, total, elapsed, speed, "N_m3u8DL-RE"),
-                        last_edit)
+                        _download_progress_text(title, quality, pct, total, elapsed, speed, "", "N_m3u8DL-RE"),
+                        last_edit, interval=3.0)
             except Exception:
                 pass
 
@@ -394,11 +516,25 @@ async def download_and_upload(
 
         # Upload
         upload_last_edit = [0.0]
+        upload_start = [0.0]
+        upload_last_bytes = [0]
+        upload_last_time = [0.0]
+        upload_speed = [0.0]
 
         async def _upload_progress(current: int, total: int):
+            if upload_start[0] == 0:
+                upload_start[0] = time.time()
+                upload_last_time[0] = time.time()
+            now = time.time()
+            dt = now - upload_last_time[0]
+            if dt > 0.5:
+                upload_speed[0] = (current - upload_last_bytes[0]) / dt
+                upload_last_bytes[0] = current
+                upload_last_time[0] = now
             await _update_progress(progress_msg,
-                _upload_progress_text(title, quality, current, total),
-                upload_last_edit, interval=5.0)
+                _upload_progress_text(title, quality, current, total,
+                                      upload_speed[0], time.time() - upload_start[0]),
+                upload_last_edit, interval=3.0)
 
         await progress_msg.edit_text(
             f"📤 <b>Uploading to Telegram</b>\n"
