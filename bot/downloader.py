@@ -282,9 +282,13 @@ async def ytdlp_download(
             if m:
                 _dl_state["eta"] = m.group(1)
 
+    _stall_detected = asyncio.Event()
+    _STALL_TIMEOUT = 120  # Kill if no new data for 2 minutes
+
     async def _monitor():
         last_disk_size = 0
         last_disk_time = time.time()
+        last_change_time = time.time()
         while proc.returncode is None:
             await asyncio.sleep(3)
             try:
@@ -302,11 +306,21 @@ async def ytdlp_download(
                 # Use disk size as authoritative size
                 _dl_state["size"] = max(_dl_state["size"], disk_size)
 
-                # Calculate speed from disk size changes if yt-dlp didn't report it
+                # Calculate speed from disk size changes
                 now = time.time()
                 dt = now - last_disk_time
-                if dt > 1 and _dl_state["speed"] == 0 and disk_size > last_disk_size:
-                    _dl_state["speed"] = (disk_size - last_disk_size) / dt
+                if dt > 1:
+                    if disk_size > last_disk_size:
+                        _dl_state["speed"] = (disk_size - last_disk_size) / dt
+                        last_change_time = now
+                    elif disk_size == last_disk_size and disk_size > 0:
+                        # No progress — check for stall
+                        _dl_state["speed"] = 0
+                        if now - last_change_time > _STALL_TIMEOUT:
+                            log.warning("yt-dlp stalled for %ds, killing", _STALL_TIMEOUT)
+                            _stall_detected.set()
+                            proc.kill()
+                            break
                 last_disk_size = disk_size
                 last_disk_time = now
 
@@ -316,12 +330,17 @@ async def ytdlp_download(
                     _dl_state["pct"] = min(95.0, disk_size / est_total * 100)
 
                 elapsed = time.time() - start_time
+                stall_info = ""
+                if _dl_state["speed"] == 0 and disk_size > 0:
+                    stall_secs = int(now - last_change_time)
+                    if stall_secs > 10:
+                        stall_info = f"\n⚠️ Stalled for {stall_secs}s..."
                 if progress_msg:
                     await _update_progress(progress_msg,
                         _download_progress_text(
                             title, quality, _dl_state["pct"],
                             _dl_state["size"], elapsed,
-                            _dl_state["speed"], _dl_state["eta"], "yt-dlp"),
+                            _dl_state["speed"], _dl_state["eta"], "yt-dlp") + stall_info,
                         last_edit, interval=3.0)
             except Exception:
                 pass
@@ -341,9 +360,21 @@ async def ytdlp_download(
             try: await t
             except asyncio.CancelledError: pass
 
+    if _stall_detected.is_set():
+        log.warning("yt-dlp was killed due to stall for %s", stream_url[:60])
+        # Clean up partial file so retry starts fresh
+        try:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            stem = Path(output_path).stem
+            for f in _TEMP_DIR.glob(f"*{stem}*"):
+                f.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
     if proc.returncode != 0:
-        err = stderr.decode()[-300:] if stderr else "unknown"
-        log.error("yt-dlp failed (%d): %s", proc.returncode, err)
+        log.error("yt-dlp failed (%d)", proc.returncode)
         return False
 
     # yt-dlp might create .mp4 or different extension
