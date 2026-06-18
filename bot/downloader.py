@@ -1,10 +1,11 @@
-"""Download manager — yt-dlp (primary) + N_m3u8DL-RE (fallback) + ffmpeg (last resort)."""
+"""Download manager — architecture-aware: N_m3u8DL-RE (x86_64) or yt-dlp (ARM64)."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import platform
 import re
 import shutil
 import tempfile
@@ -19,6 +20,13 @@ from api.models import Quality
 log = logging.getLogger(__name__)
 
 TG_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024
+
+# Architecture detection
+_ARCH = platform.machine().lower()
+IS_ARM = "aarch64" in _ARCH or "arm" in _ARCH
+IS_X86 = "x86_64" in _ARCH or "amd64" in _ARCH
+
+log.info("Detected architecture: %s (ARM=%s, x86=%s)", _ARCH, IS_ARM, IS_X86)
 
 _TEMP_DIR = Path(tempfile.gettempdir()) / "animedekho_dl"
 _TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -527,15 +535,24 @@ async def download_and_upload(
         is_m3u8 = ".m3u8" in stream_url.lower()
 
         if is_m3u8:
-            # 1. Try yt-dlp (works on all architectures)
-            success = await ytdlp_download(
-                stream_url, quality, output_path, progress_msg, title)
-
-            # 2. Try N_m3u8DL-RE (may fail on ARM64)
-            if not success:
-                log.info("yt-dlp failed, trying N_m3u8DL-RE for %s", title)
+            if IS_ARM:
+                # ARM64: yt-dlp primary, N_m3u8DL-RE fallback
+                log.info("ARM64 detected — using yt-dlp as primary for %s", title[:50])
+                success = await ytdlp_download(
+                    stream_url, quality, output_path, progress_msg, title)
+                if not success:
+                    log.info("yt-dlp failed, trying N_m3u8DL-RE fallback for %s", title[:50])
+                    success = await n_m3u8dl_re_download(
+                        stream_url, quality, output_path, progress_msg, title)
+            else:
+                # x86_64/AMD64: N_m3u8DL-RE primary, yt-dlp fallback
+                log.info("x86_64 detected — using N_m3u8DL-RE as primary for %s", title[:50])
                 success = await n_m3u8dl_re_download(
                     stream_url, quality, output_path, progress_msg, title)
+                if not success:
+                    log.info("N_m3u8DL-RE failed, trying yt-dlp fallback for %s", title[:50])
+                    success = await ytdlp_download(
+                        stream_url, quality, output_path, progress_msg, title)
 
             if not success:
                 log.error("All download methods failed for %s", title)
