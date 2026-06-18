@@ -28,11 +28,14 @@ def _safe_url_btn(label: str, url: str) -> InlineKeyboardButton | None:
     return None
 
 
-def main_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def main_menu(invite_link: str | None = None) -> InlineKeyboardMarkup:
+    buttons = [
         [InlineKeyboardButton("📺 Recent Series", callback_data="rp:1")],
         [InlineKeyboardButton("📂 Browse Genres", callback_data="m:genres")],
-    ])
+    ]
+    if invite_link:
+        buttons.append([InlineKeyboardButton("📢 Join Our Channel", url=invite_link)])
+    return InlineKeyboardMarkup(buttons)
 
 
 def search_results(results: list[SearchResult]) -> InlineKeyboardMarkup:

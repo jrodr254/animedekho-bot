@@ -26,15 +26,26 @@ async def cmd_start(client: Client, message: Message):
     if bot.logger.bot_logger:
         await bot.logger.bot_logger.log_bot_start(user.id, user.username or user.first_name)
 
-    await message.reply_text(
+    # Get channel invite link for the welcome message
+    from bot.database import db
+    invite_link = None
+    if db:
+        invite_link = await db.get_config("channel_invite_link")
+
+    welcome_text = (
         "🎌 <b>AnimeDekho Bot</b>\n\n"
-        "Stream Hindi / Tamil / Telugu dubbed anime!\n\n"
+        "Stream Hindi dubbed anime!\n\n"
         "• 📺 <b>Series</b> — browse recent series\n"
-        "• 🎬 <b>Movies</b> — browse movies\n"
         "• 📂 <b>Genres</b> — filter by genre\n\n"
-        "Just type any anime name to search!",
+        "Just type any anime name to search!"
+    )
+
+    markup = main_menu(invite_link=invite_link)
+
+    await message.reply_text(
+        welcome_text,
         parse_mode=enums.ParseMode.HTML,
-        reply_markup=main_menu(),
+        reply_markup=markup,
     )
 
 

@@ -63,6 +63,23 @@ async def _on_start(client: Client):
                         log.warning("Could not resolve %s channel %d via raw API", name, cid)
                 except Exception as e2:
                     log.warning("Could not resolve %s channel %d: %s", name, cid, e2)
+    # Auto-generate channel invite link if not set
+    if settings.bot.main_channel:
+        try:
+            from bot.database import db as app_db
+            existing_link = await app_db.get_config("channel_invite_link") if app_db else None
+            if not existing_link:
+                chat = await client.get_chat(settings.bot.main_channel)
+                if chat.invite_link:
+                    invite_link = chat.invite_link
+                else:
+                    invite_link = (await client.create_chat_invite_link(settings.bot.main_channel)).invite_link
+                if invite_link and app_db:
+                    await app_db.set_config("channel_invite_link", invite_link)
+                    log.info("Auto-set channel invite link: %s", invite_link)
+        except Exception as e:
+            log.warning("Could not auto-generate invite link: %s", e)
+
     # Set bot commands menu
     from pyrogram.types import BotCommand, BotCommandScopeChat
     try:
