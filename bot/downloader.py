@@ -215,13 +215,14 @@ async def ytdlp_download(
         "--fragment-retries", "10",
         "--retry-sleep", "linear=1::5",
         "--socket-timeout", "30",
+        "--audio-multistreams",
     ]
 
     if height:
-        # Select specific quality + all audio tracks
-        cmd.extend(["-f", f"bv*[height={height}]+ba/bv*[height<={height}]+ba/b"])
+        # Select specific quality + ALL audio tracks
+        cmd.extend(["-f", f"bv*[height={height}]+ba*/bv*[height<={height}]+ba*/b"])
     else:
-        cmd.extend(["-f", "bv*+ba/b"])
+        cmd.extend(["-f", "bv*+ba*/b"])
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
