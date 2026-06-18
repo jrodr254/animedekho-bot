@@ -210,8 +210,11 @@ async def ytdlp_download(
         "--referer", f"{origin}/",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "--merge-output-format", "mp4",
-        "--no-part",
-        "--concurrent-fragments", "8",
+        "--concurrent-fragments", "4",
+        "--retries", "10",
+        "--fragment-retries", "10",
+        "--retry-sleep", "linear=1::5",
+        "--socket-timeout", "30",
     ]
 
     if height:
@@ -283,7 +286,7 @@ async def ytdlp_download(
                 _dl_state["eta"] = m.group(1)
 
     _stall_detected = asyncio.Event()
-    _STALL_TIMEOUT = 120  # Kill if no new data for 2 minutes
+    _STALL_TIMEOUT = 180  # Kill if no new data for 3 minutes (allows retries)
 
     async def _monitor():
         last_disk_size = 0
