@@ -533,43 +533,58 @@ async def ffmpeg_hls_download(
     start_time = time.time()
 
     origin = _get_origin(stream_url)
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-    # For master m3u8: use -map 0:v:0 (first/best video) + -map 0:a (ALL audio)
+    # For master m3u8: -map 0:v:0 (best video) + -map 0:a (ALL audio tracks)
+    # Use -headers with proper \r\n line endings for HLS protocol
+    headers_str = f"Referer: {origin}/\r\nUser-Agent: {ua}\r\n"
+
     cmd = [
         "ffmpeg", "-y",
-        "-referer", f"{origin}/",
-        "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "-loglevel", "warning",
+        "-headers", headers_str,
+        "-allowed_extensions", "ALL",
         "-i", stream_url,
         "-map", "0:v:0",    # First video stream
-        "-map", "0:a?",     # ALL audio tracks (? = don't fail if none)
-        "-c", "copy",       # No re-encoding, just remux
+        "-map", "0:a",      # ALL audio tracks
+        "-c", "copy",       # No re-encoding
         "-movflags", "+faststart",
         output_path,
     ]
 
+    log.info("ffmpeg cmd: %s", " ".join(f'"{c}"' if " " in c else c for c in cmd[:8]) + " ...")
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stderr=asyncio.subprocess.PIPE,  # Capture stderr separately for errors
     )
 
     _dl_state = {"pct": 0.0, "size": 0, "speed": 0.0}
+    _stderr_chunks: list[bytes] = []
 
-    async def _read_output():
-        """Drain ffmpeg output to prevent pipe blocking."""
+    async def _read_stderr():
+        """Capture ffmpeg error output."""
         while True:
-            chunk = await proc.stdout.read(4096)
+            chunk = await proc.stderr.read(4096)
             if not chunk:
                 break
-            # ffmpeg progress parsing (time=HH:MM:SS.xx)
+            _stderr_chunks.append(chunk)
             text = chunk.decode(errors="replace")
+            # Parse progress from stderr (ffmpeg writes progress to stderr)
             m = re.search(r'time=(\d+):(\d+):(\d+)', text)
             if m:
                 h, mn, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 secs = h * 3600 + mn * 60 + s
-                # Estimate % (assume 24min episode)
                 est_duration = 24 * 60
                 _dl_state["pct"] = min(99, secs / est_duration * 100)
+
+    async def _read_stdout():
+        """Drain stdout."""
+        while True:
+            chunk = await proc.stdout.read(4096)
+            if not chunk:
+                break
 
     async def _monitor():
         last_disk_size = 0
@@ -601,7 +616,8 @@ async def ffmpeg_hls_download(
             except Exception:
                 pass
 
-    read_task = asyncio.create_task(_read_output())
+    stderr_task = asyncio.create_task(_read_stderr())
+    stdout_task = asyncio.create_task(_read_stdout())
     monitor_task = asyncio.create_task(_monitor())
 
     try:
@@ -611,19 +627,14 @@ async def ffmpeg_hls_download(
         log.error("ffmpeg timed out")
         return False
     finally:
-        for t in (read_task, monitor_task):
+        for t in (stderr_task, stdout_task, monitor_task):
             t.cancel()
             try: await t
             except asyncio.CancelledError: pass
 
     if proc.returncode != 0:
-        # Try to get last output for debugging
-        try:
-            remaining = await asyncio.wait_for(proc.stdout.read(), timeout=1)
-            err_text = remaining.decode(errors="replace")[-500:] if remaining else ""
-        except Exception:
-            err_text = ""
-        log.error("ffmpeg failed (%d): %s", proc.returncode, err_text)
+        err_text = b"".join(_stderr_chunks).decode(errors="replace")[-1000:]
+        log.error("ffmpeg failed (%d):\n%s", proc.returncode, err_text)
         return False
 
     return os.path.exists(output_path) and os.path.getsize(output_path) > 0
