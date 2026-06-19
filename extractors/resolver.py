@@ -87,6 +87,8 @@ async def get_m3u8_qualities(m3u8_url: str) -> list[Quality]:
             headers["Referer"] = f"https://{domain}/"
             
         content = await http_client.get(m3u8_url, headers=headers, ttl=60)
+        # Log full m3u8 for debugging audio tracks
+        log.info("Master m3u8 content:\n%s", content[:2000])
         qualities = parse_m3u8_qualities(content, m3u8_url)
         if qualities:
             log.info("Found %d quality variants in master m3u8: %s", len(qualities),

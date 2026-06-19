@@ -535,12 +535,12 @@ async def ffmpeg_hls_download(
     origin = _get_origin(stream_url)
 
     # For master m3u8: use -map 0:v:0 (first/best video) + -map 0:a (ALL audio)
-    # ffmpeg auto-selects best video from master playlist variants
     cmd = [
         "ffmpeg", "-y",
-        "-headers", f"Referer: {origin}/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n",
+        "-referer", f"{origin}/",
+        "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "-i", stream_url,
-        "-map", "0:v:0",    # First video stream (highest quality from master)
+        "-map", "0:v:0",    # First video stream
         "-map", "0:a?",     # ALL audio tracks (? = don't fail if none)
         "-c", "copy",       # No re-encoding, just remux
         "-movflags", "+faststart",
@@ -617,7 +617,13 @@ async def ffmpeg_hls_download(
             except asyncio.CancelledError: pass
 
     if proc.returncode != 0:
-        log.error("ffmpeg failed (%d)", proc.returncode)
+        # Try to get last output for debugging
+        try:
+            remaining = await asyncio.wait_for(proc.stdout.read(), timeout=1)
+            err_text = remaining.decode(errors="replace")[-500:] if remaining else ""
+        except Exception:
+            err_text = ""
+        log.error("ffmpeg failed (%d): %s", proc.returncode, err_text)
         return False
 
     return os.path.exists(output_path) and os.path.getsize(output_path) > 0
