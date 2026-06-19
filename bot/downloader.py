@@ -523,121 +523,228 @@ async def ffmpeg_hls_download(
     progress_msg: Message | None = None,
     title: str = "video",
 ) -> bool:
-    """Download HLS using ffmpeg directly — maps ALL audio tracks."""
-    if not shutil.which("ffmpeg"):
-        log.warning("ffmpeg not found")
+    """Download HLS with ALL audio tracks by downloading video + each audio separately, then merging."""
+    if not shutil.which("ffmpeg") or not shutil.which("yt-dlp"):
+        log.warning("ffmpeg or yt-dlp not found for multi-audio download")
         return False
 
-    log.info("ffmpeg download: url=%s quality=%s", stream_url[:120], quality)
+    log.info("multi-audio download: url=%s quality=%s", stream_url[:120], quality)
     last_edit = [0.0]
     start_time = time.time()
 
     origin = _get_origin(stream_url)
-    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    height = quality.replace("p", "") if quality.endswith("p") and quality[:-1].isdigit() else ""
 
-    # For master m3u8: -map 0:v:0 (best video) + -map 0:a (ALL audio tracks)
-    # Use -headers with proper \r\n line endings for HLS protocol
-    headers_str = f"Referer: {origin}/\r\nUser-Agent: {ua}\r\n"
+    # Parse audio track URLs from master m3u8
+    audio_tracks = await _parse_audio_tracks(stream_url, origin)
+    if not audio_tracks:
+        log.info("No separate audio tracks found in master m3u8")
+        return False
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-loglevel", "warning",
-        "-headers", headers_str,
-        "-allowed_extensions", "ALL",
-        "-i", stream_url,
-        "-map", "0:v:0",    # First video stream
-        "-map", "0:a",      # ALL audio tracks
-        "-c", "copy",       # No re-encoding
-        "-movflags", "+faststart",
-        output_path,
-    ]
+    log.info("Found %d audio tracks: %s", len(audio_tracks),
+             ", ".join(f"{t['name']} ({t['lang']})" for t in audio_tracks))
 
-    log.info("ffmpeg cmd: %s", " ".join(f'"{c}"' if " " in c else c for c in cmd[:8]) + " ...")
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,  # Capture stderr separately for errors
-    )
-
-    _dl_state = {"pct": 0.0, "size": 0, "speed": 0.0}
-    _stderr_chunks: list[bytes] = []
-
-    async def _read_stderr():
-        """Capture ffmpeg error output."""
-        while True:
-            chunk = await proc.stderr.read(4096)
-            if not chunk:
-                break
-            _stderr_chunks.append(chunk)
-            text = chunk.decode(errors="replace")
-            # Parse progress from stderr (ffmpeg writes progress to stderr)
-            m = re.search(r'time=(\d+):(\d+):(\d+)', text)
-            if m:
-                h, mn, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                secs = h * 3600 + mn * 60 + s
-                est_duration = 24 * 60
-                _dl_state["pct"] = min(99, secs / est_duration * 100)
-
-    async def _read_stdout():
-        """Drain stdout."""
-        while True:
-            chunk = await proc.stdout.read(4096)
-            if not chunk:
-                break
-
-    async def _monitor():
-        last_disk_size = 0
-        last_disk_time = time.time()
-        while proc.returncode is None:
-            await asyncio.sleep(3)
-            try:
-                disk_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
-                _dl_state["size"] = disk_size
-
-                now = time.time()
-                dt = now - last_disk_time
-                if dt > 1 and disk_size > last_disk_size:
-                    _dl_state["speed"] = (disk_size - last_disk_size) / dt
-                last_disk_size = disk_size
-                last_disk_time = now
-
-                if _dl_state["pct"] == 0 and disk_size > 0:
-                    est = {"1080p": 400, "720p": 200, "480p": 100}.get(quality, 200) * 1024 * 1024
-                    _dl_state["pct"] = min(95, disk_size / est * 100)
-
-                elapsed = time.time() - start_time
-                if progress_msg and disk_size > 100_000:
-                    await _update_progress(progress_msg,
-                        _download_progress_text(
-                            title, quality, _dl_state["pct"],
-                            disk_size, elapsed, _dl_state["speed"], "", "ffmpeg"),
-                        last_edit, interval=3.0)
-            except Exception:
-                pass
-
-    stderr_task = asyncio.create_task(_read_stderr())
-    stdout_task = asyncio.create_task(_read_stdout())
-    monitor_task = asyncio.create_task(_monitor())
+    stem = Path(output_path).stem
+    tmp_dir = _TEMP_DIR / f"{stem}_tracks"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        await asyncio.wait_for(proc.wait(), timeout=2400)
-    except asyncio.TimeoutError:
-        proc.kill()
-        log.error("ffmpeg timed out")
-        return False
+        # Step 1: Download video only with yt-dlp
+        video_path = str(tmp_dir / "video.mp4")
+        if progress_msg:
+            await _update_progress(progress_msg,
+                _download_progress_text(title, quality, 0, 0, 0, 0, "", "video"), [0])
+
+        vid_fmt = f"bv*[height={height}]/bv*/b" if height else "bv*/b"
+        vid_cmd = [
+            "yt-dlp", stream_url, "-o", video_path,
+            "--no-warnings", "--no-check-certificates",
+            "--referer", f"{origin}/",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "--merge-output-format", "mp4",
+            "-f", vid_fmt,
+            "--concurrent-fragments", "4",
+            "--retries", "10", "--fragment-retries", "10",
+            "--socket-timeout", "30",
+        ]
+
+        vid_proc = await asyncio.create_subprocess_exec(
+            *vid_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+
+        async def _drain(p):
+            while True:
+                chunk = await p.stdout.read(4096)
+                if not chunk:
+                    break
+
+        async def _vid_monitor():
+            while vid_proc.returncode is None:
+                await asyncio.sleep(3)
+                try:
+                    size = os.path.getsize(video_path) if os.path.exists(video_path) else 0
+                    elapsed = time.time() - start_time
+                    if progress_msg and size > 50_000:
+                        pct_est = min(60, size / ({"1080p": 300, "720p": 150, "480p": 80}.get(quality, 150) * 1024 * 1024) * 60)
+                        await _update_progress(progress_msg,
+                            _download_progress_text(title, quality, pct_est, size, elapsed, 0, "", "video"), last_edit, interval=3.0)
+                except Exception:
+                    pass
+
+        drain_task = asyncio.create_task(_drain(vid_proc))
+        mon_task = asyncio.create_task(_vid_monitor())
+        try:
+            await asyncio.wait_for(vid_proc.wait(), timeout=1800)
+        except asyncio.TimeoutError:
+            vid_proc.kill()
+        finally:
+            for t in (drain_task, mon_task):
+                t.cancel()
+                try: await t
+                except asyncio.CancelledError: pass
+
+        if not os.path.exists(video_path):
+            # Check alternative extensions
+            for ext in [".mp4", ".mkv", ".webm"]:
+                alt = str(tmp_dir / f"video{ext}")
+                if os.path.exists(alt):
+                    os.rename(alt, video_path)
+                    break
+
+        if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
+            log.error("Video download failed")
+            return False
+
+        log.info("Video downloaded: %s (%s)", video_path, _format_size(os.path.getsize(video_path)))
+
+        # Step 2: Download each audio track with yt-dlp
+        audio_paths = []
+        for i, track in enumerate(audio_tracks):
+            audio_path = str(tmp_dir / f"audio_{track['lang']}.m4a")
+            audio_url = track["url"]
+
+            if progress_msg:
+                pct = 60 + (i / len(audio_tracks)) * 30
+                await _update_progress(progress_msg,
+                    _download_progress_text(title, quality, pct, 0, time.time() - start_time, 0,
+                                            "", f"audio: {track['name']}"),
+                    last_edit, interval=2.0)
+
+            audio_cmd = [
+                "yt-dlp", audio_url, "-o", audio_path,
+                "--no-warnings", "--no-check-certificates",
+                "--referer", f"{origin}/",
+                "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "-f", "ba/b",
+                "--retries", "10", "--fragment-retries", "10",
+                "--socket-timeout", "30",
+            ]
+
+            a_proc = await asyncio.create_subprocess_exec(
+                *audio_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            a_drain = asyncio.create_task(_drain(a_proc))
+            try:
+                await asyncio.wait_for(a_proc.wait(), timeout=600)
+            except asyncio.TimeoutError:
+                a_proc.kill()
+            finally:
+                a_drain.cancel()
+                try: await a_drain
+                except asyncio.CancelledError: pass
+
+            # Check for the file with various extensions
+            if not os.path.exists(audio_path):
+                for ext in [".m4a", ".mp4", ".webm", ".ogg", ".opus"]:
+                    alt = str(tmp_dir / f"audio_{track['lang']}{ext}")
+                    if os.path.exists(alt) and alt != audio_path:
+                        audio_path = alt
+                        break
+
+            if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+                audio_paths.append({"path": audio_path, "lang": track["lang"], "name": track["name"]})
+                log.info("Audio downloaded: %s (%s) - %s", track["name"], track["lang"],
+                         _format_size(os.path.getsize(audio_path)))
+            else:
+                log.warning("Audio track failed: %s (%s)", track["name"], track["lang"])
+
+        if not audio_paths:
+            log.error("No audio tracks downloaded")
+            return False
+
+        # Step 3: Merge video + all audio tracks with ffmpeg
+        if progress_msg:
+            await _update_progress(progress_msg,
+                _download_progress_text(title, quality, 92, 0, time.time() - start_time, 0, "", "merging"),
+                last_edit, interval=1.0)
+
+        merge_cmd = ["ffmpeg", "-y", "-loglevel", "warning"]
+        merge_cmd.extend(["-i", video_path])
+        for ap in audio_paths:
+            merge_cmd.extend(["-i", ap["path"]])
+
+        # Map video from first input
+        merge_cmd.extend(["-map", "0:v:0"])
+        # Map audio from each input
+        for i in range(len(audio_paths)):
+            merge_cmd.extend(["-map", f"{i+1}:a:0"])
+
+        merge_cmd.extend(["-c", "copy", "-movflags", "+faststart"])
+
+        # Set audio track metadata (language + title)
+        for i, ap in enumerate(audio_paths):
+            merge_cmd.extend([
+                f"-metadata:s:a:{i}", f"language={ap['lang']}",
+                f"-metadata:s:a:{i}", f"title={ap['name']}",
+            ])
+
+        merge_cmd.append(output_path)
+
+        log.info("Merging: video + %d audio tracks", len(audio_paths))
+        m_proc = await asyncio.create_subprocess_exec(
+            *merge_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        _, m_stderr = await asyncio.wait_for(m_proc.communicate(), timeout=300)
+
+        if m_proc.returncode != 0:
+            log.error("ffmpeg merge failed (%d): %s", m_proc.returncode,
+                      m_stderr.decode(errors="replace")[-500:] if m_stderr else "")
+            return False
+
+        success = os.path.exists(output_path) and os.path.getsize(output_path) > 0
+        if success:
+            log.info("Multi-audio merge complete: %s (%s, %d audio tracks)",
+                     output_path, _format_size(os.path.getsize(output_path)), len(audio_paths))
+        return success
+
     finally:
-        for t in (stderr_task, stdout_task, monitor_task):
-            t.cancel()
-            try: await t
-            except asyncio.CancelledError: pass
+        # Cleanup temp track files
+        try:
+            import shutil as _shutil
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
-    if proc.returncode != 0:
-        err_text = b"".join(_stderr_chunks).decode(errors="replace")[-1000:]
-        log.error("ffmpeg failed (%d):\n%s", proc.returncode, err_text)
-        return False
 
-    return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+async def _parse_audio_tracks(master_url: str, origin: str) -> list[dict]:
+    """Parse #EXT-X-MEDIA:TYPE=AUDIO entries from master m3u8."""
+    from urllib.parse import urljoin
+    try:
+        from api.client import http_client
+        headers = {"Referer": f"{origin}/"}
+        content = await http_client.get(master_url, headers=headers, ttl=60)
+
+        tracks = []
+        for m in re.finditer(
+            r'#EXT-X-MEDIA:TYPE=AUDIO[^\n]*LANGUAGE="([^"]*)"[^\n]*NAME="([^"]*)"[^\n]*URI="([^"]*)"',
+            content
+        ):
+            lang, name, uri = m.group(1), m.group(2), m.group(3)
+            # Resolve relative URIs
+            if not uri.startswith("http"):
+                uri = urljoin(master_url, uri)
+            tracks.append({"lang": lang, "name": name, "url": uri})
+        return tracks
+    except Exception as e:
+        log.warning("Failed to parse audio tracks: %s", e)
+        return []
 
 
 # ── Main download + upload ────────────────────────────────────────────
