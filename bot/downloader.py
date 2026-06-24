@@ -727,7 +727,7 @@ async def _parse_audio_tracks(master_url: str, origin: str) -> list[dict]:
     """Parse #EXT-X-MEDIA:TYPE=AUDIO entries from master m3u8."""
     from urllib.parse import urljoin
     try:
-        from api.client import http_client
+        from utils.http import http_client
         headers = {"Referer": f"{origin}/"}
         content = await http_client.get(master_url, headers=headers, ttl=60)
 
