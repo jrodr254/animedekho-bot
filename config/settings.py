@@ -58,7 +58,7 @@ class BotConfig:
     max_genres: int = 20
     episodes_per_row: int = 5
     seasons_per_row: int = 4
-    slug_max_len: int = 42
+    slug_max_len: int = 55
     log_level: str = field(default_factory=lambda: os.environ.get("LOG_LEVEL", "INFO"))
 
 
