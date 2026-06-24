@@ -148,7 +148,7 @@ def quality_picker(
     """Show quality buttons. Marks available ones with ✅, unavailable with ⚡ (will use closest)."""
     buttons = []
     prefix = "mdl" if is_movie else "dl"
-    ss = short_slug(slug, 48)
+    ss = short_slug(slug)
 
     default_q = settings.site.default_qualities  # ["480p", "720p", "1080p"]
 
