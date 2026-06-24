@@ -165,13 +165,20 @@ class HTTPClient:
         no_cache: bool = False,
         cache_key: str = "",
     ) -> str:
-        """Make a request using cloudscraper (runs in thread pool)."""
+        """Make a request using cloudscraper (runs in thread pool).
+        
+        Falls back to aiohttp if cloudscraper fails with 403/429.
+        """
         loop = asyncio.get_event_loop()
 
         def _do_request():
             merged_headers = dict(DEFAULT_HEADERS)
             if headers:
                 merged_headers.update(headers)
+
+            # Recreate scraper if needed (fresh challenge cookies)
+            if self._cloudscraper is None:
+                self._cloudscraper = cloudscraper.create_scraper()
 
             if method.upper() == "POST":
                 resp = self._cloudscraper.post(
@@ -193,12 +200,27 @@ class HTTPClient:
                 return text
             except Exception as e:
                 last_error = e
+                status = getattr(getattr(e, 'response', None), 'status_code', 0)
                 log.warning(
-                    "Cloudscraper request failed (attempt %d/3): %s %s — %s",
-                    attempt + 1, method, url, e,
+                    "Cloudscraper request failed (attempt %d/3): %s %s — %s (status=%s)",
+                    attempt + 1, method, url, e, status,
                 )
+                # Recreate scraper on 403/429 to get fresh challenge
+                if status in (403, 429):
+                    self._cloudscraper = cloudscraper.create_scraper()
                 if attempt < 2:
                     await asyncio.sleep(2 ** attempt)
+
+        # Fallback to aiohttp if cloudscraper completely fails
+        log.warning("Cloudscraper failed for %s, trying aiohttp fallback", url)
+        try:
+            return await self._aiohttp_request(
+                method, url, headers=headers, data=data,
+                ttl=ttl, no_cache=no_cache, max_retries=2,
+                cache_key=cache_key,
+            )
+        except Exception:
+            pass
 
         raise last_error or Exception(f"Cloudscraper request failed: {url}")
 

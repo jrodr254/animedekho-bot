@@ -33,12 +33,25 @@ class AnimeDekhoAPI:
     async def _ensure_nonce(self) -> str:
         if self._nonce:
             return self._nonce
-        html = await http_client.get(f"{cfg.base_url}/home/", ttl=600)
-        self._nonce = parse_nonce(html)
-        if not self._nonce:
-            raise RuntimeError("Failed to extract nonce from site")
-        log.info("Nonce acquired: %s", self._nonce[:6] + "...")
-        return self._nonce
+        # Try multiple URLs to get nonce — some may be blocked by CF
+        urls_to_try = [
+            f"{cfg.base_url}/home/",
+            f"{cfg.base_url}/",
+            f"{cfg.base_url}/series-hindi/",
+        ]
+        last_error = None
+        for url in urls_to_try:
+            try:
+                html = await http_client.get(url, ttl=600)
+                self._nonce = parse_nonce(html)
+                if self._nonce:
+                    log.info("Nonce acquired from %s: %s...", url, self._nonce[:6])
+                    return self._nonce
+            except Exception as e:
+                last_error = e
+                log.warning("Nonce fetch failed for %s: %s", url, e)
+                continue
+        raise RuntimeError(f"Failed to extract nonce from site: {last_error}")
 
     def _invalidate_nonce(self):
         self._nonce = None
