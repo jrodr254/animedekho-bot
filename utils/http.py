@@ -1,198 +1,385 @@
-"""Managed aiohttp session with caching and cookie bypass."""
+"""
+Async HTTP client with caching, retries, and Cloudflare bypass.
+
+Uses aiohttp for general requests and cloudscraper for Cloudflare-protected
+sites (like animedekho.app).
+"""
 
 from __future__ import annotations
-import hashlib
+
+import asyncio
+import json
 import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any
+from urllib.parse import urljoin
 
 import aiohttp
-
-from config.settings import settings
-from .cache import TTLCache
+import cloudscraper
 
 log = logging.getLogger(__name__)
 
+# ── Constants ──────────────────────────────────────────────────────────
 
-class HttpClient:
+DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+# Domains that need cloudscraper (Cloudflare-protected)
+_CLOUDFLARE_DOMAINS = ("animedekho.app",)
+
+
+# ── Cache entry ────────────────────────────────────────────────────────
+
+
+@dataclass
+class _CacheEntry:
+    data: Any
+    expires: float
+
+
+# ── HTTP client ────────────────────────────────────────────────────────
+
+
+class HTTPClient:
+    """
+    Async HTTP client with:
+    - In-memory response cache (respects ``ttl`` kwarg)
+    - Automatic retries with exponential backoff
+    - Cloudflare bypass via cloudscraper for protected domains
+    """
+
     def __init__(self) -> None:
         self._session: aiohttp.ClientSession | None = None
-        self._cache = TTLCache(max_entries=settings.cache.max_entries)
+        self._cloudscraper: cloudscraper.CloudScraper | None = None
+        self._cache: dict[str, _CacheEntry] = {}
+        self._lock = asyncio.Lock()
+
+    # ── Lifecycle ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
+        """Create the underlying aiohttp session."""
         if self._session is None or self._session.closed:
-            jar = aiohttp.CookieJar()
             self._session = aiohttp.ClientSession(
-                headers={"User-Agent": settings.site.user_agent},
-                timeout=aiohttp.ClientTimeout(total=settings.site.request_timeout),
-                cookie_jar=jar,
+                headers=DEFAULT_HEADERS,
+                timeout=DEFAULT_TIMEOUT,
             )
-            # Set bypass cookie
-            for name, val in settings.site.bypass_cookie.items():
-                self._session.cookie_jar.update_cookies(
-                    {name: val},
-                    response_url=aiohttp.typedefs.URL(settings.site.base_url),
-                )
+        if self._cloudscraper is None:
+            self._cloudscraper = cloudscraper.create_scraper()
 
     async def close(self) -> None:
+        """Close the aiohttp session."""
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+        self._cloudscraper = None
 
-    @property
-    def session(self) -> aiohttp.ClientSession:
-        assert self._session and not self._session.closed, "Call start() first"
-        return self._session
+    # ── Internal helpers ───────────────────────────────────────────────
 
-    @staticmethod
-    def _key(url: str) -> str:
-        return hashlib.md5(url.encode()).hexdigest()
+    def _cache_key(self, method: str, url: str, **kwargs) -> str:
+        """Build a deterministic cache key."""
+        parts = [method.upper(), url]
+        if "headers" in kwargs:
+            parts.append(json.dumps(kwargs["headers"], sort_keys=True))
+        if "data" in kwargs:
+            parts.append(json.dumps(kwargs["data"], sort_keys=True))
+        return "|".join(parts)
 
-    async def get(self, url: str, ttl: int | None = None, **kwargs) -> str:
-        ttl = ttl if ttl is not None else settings.cache.default_ttl
-        k = self._key(url)
-        cached = await self._cache.get(k)
-        if cached is not None:
-            return cached
-        await self.start()
-        async with self._session.get(url, **kwargs) as r:
-            r.raise_for_status()
-            text = await r.text()
-        await self._cache.set(k, text, ttl)
-        return text
+    def _is_cloudflare_domain(self, url: str) -> bool:
+        """Check if URL belongs to a Cloudflare-protected domain."""
+        return any(domain in url for domain in _CLOUDFLARE_DOMAINS)
 
-    async def post(self, url: str, data: dict, ttl: int | None = None) -> str:
-        await self.start()
-        if ttl:
-            k = self._key(url + str(sorted(data.items())))
-            cached = await self._cache.get(k)
+    def _get_cached(self, key: str) -> Any | None:
+        entry = self._cache.get(key)
+        if entry and time.time() < entry.expires:
+            return entry.data
+        if entry:
+            del self._cache[key]
+        return None
+
+    def _set_cached(self, key: str, data: Any, ttl: int) -> None:
+        if ttl > 0:
+            self._cache[key] = _CacheEntry(data=data, expires=time.time() + ttl)
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        data: dict[str, Any] | None = None,
+        ttl: int = 300,
+        no_cache: bool = False,
+        max_retries: int = 3,
+        **kwargs,
+    ) -> str:
+        """
+        Make an HTTP request with caching and retries.
+        Uses cloudscraper for Cloudflare-protected domains.
+        """
+        cache_key = self._cache_key(method, url, headers=headers, data=data)
+
+        if not no_cache and ttl > 0:
+            cached = self._get_cached(cache_key)
             if cached is not None:
+                log.debug("Cache hit: %s %s", method, url)
                 return cached
-        async with self._session.post(url, data=data) as r:
-            r.raise_for_status()
-            text = await r.text()
-        if ttl:
-            await self._cache.set(k, text, ttl)
-        return text
 
-    async def get_json(self, url: str, ttl: int | None = None, **kwargs) -> dict:
-        ttl = ttl if ttl is not None else settings.cache.default_ttl
-        k = self._key(url)
-        cached = await self._cache.get(k)
-        if cached is not None:
-            import json
+        # Use cloudscraper for Cloudflare-protected domains
+        if self._is_cloudflare_domain(url):
+            return await self._cloudscraper_request(
+                method, url, headers=headers, data=data,
+                ttl=ttl, no_cache=no_cache, cache_key=cache_key,
+            )
+
+        # Use aiohttp for normal requests
+        return await self._aiohttp_request(
+            method, url, headers=headers, data=data,
+            ttl=ttl, no_cache=no_cache, max_retries=max_retries,
+            cache_key=cache_key, **kwargs,
+        )
+
+    async def _cloudscraper_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        data: dict[str, Any] | None = None,
+        ttl: int = 300,
+        no_cache: bool = False,
+        cache_key: str = "",
+    ) -> str:
+        """Make a request using cloudscraper (runs in thread pool)."""
+        loop = asyncio.get_event_loop()
+
+        def _do_request():
+            merged_headers = dict(DEFAULT_HEADERS)
+            if headers:
+                merged_headers.update(headers)
+
+            if method.upper() == "POST":
+                resp = self._cloudscraper.post(
+                    url, data=data, headers=merged_headers, timeout=30
+                )
+            else:
+                resp = self._cloudscraper.get(
+                    url, headers=merged_headers, timeout=30
+                )
+            resp.raise_for_status()
+            return resp.text
+
+        last_error = None
+        for attempt in range(3):
             try:
-                return json.loads(cached)
-            except Exception:
-                pass
-        await self.start()
-        async with self._session.get(url, **kwargs) as r:
-            r.raise_for_status()
-            data = await r.json()
-            import json
-            await self._cache.set(k, json.dumps(data), ttl)
-        return data
+                text = await loop.run_in_executor(None, _do_request)
+                if not no_cache and ttl > 0 and cache_key:
+                    self._set_cached(cache_key, text, ttl)
+                return text
+            except Exception as e:
+                last_error = e
+                log.warning(
+                    "Cloudscraper request failed (attempt %d/3): %s %s — %s",
+                    attempt + 1, method, url, e,
+                )
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
 
-    # ── Uncached helpers (for shortener bypass & redirects) ───────
+        raise last_error or Exception(f"Cloudscraper request failed: {url}")
 
-    async def get_text_no_cache(
-        self, url: str, *, headers: dict | None = None
+    async def _aiohttp_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        data: dict[str, Any] | None = None,
+        ttl: int = 300,
+        no_cache: bool = False,
+        max_retries: int = 3,
+        cache_key: str = "",
+        **kwargs,
     ) -> str:
-        """GET a URL without caching. Accepts extra headers."""
-        await self.start()
-        merged = dict(self._session.headers)
+        """Make a request using aiohttp."""
+        merged_headers = dict(DEFAULT_HEADERS)
         if headers:
-            merged.update(headers)
-        async with self._session.get(url, headers=merged) as r:
-            r.raise_for_status()
-            return await r.text()
+            merged_headers.update(headers)
 
-    async def post_no_cache(
-        self, url: str, *, data: dict, headers: dict | None = None
-    ) -> str:
-        """POST form data without caching. Accepts extra headers."""
-        await self.start()
-        merged = dict(self._session.headers)
-        if headers:
-            merged.update(headers)
-        async with self._session.post(url, data=data, headers=merged) as r:
-            r.raise_for_status()
-            return await r.text()
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                async with self._lock:
+                    session = self._session
+                if session is None or session.closed:
+                    await self.start()
+                    session = self._session
+
+                if method.upper() == "POST":
+                    async with session.post(
+                        url, data=data, headers=merged_headers, **kwargs
+                    ) as resp:
+                        resp.raise_for_status()
+                        text = await resp.text()
+                else:
+                    async with session.get(
+                        url, headers=merged_headers, **kwargs
+                    ) as resp:
+                        resp.raise_for_status()
+                        text = await resp.text()
+
+                if not no_cache and ttl > 0 and cache_key:
+                    self._set_cached(cache_key, text, ttl)
+                return text
+
+            except aiohttp.ClientResponseError as e:
+                last_error = e
+                if e.status in (429, 500, 502, 503, 504):
+                    wait = 2 ** attempt
+                    log.warning(
+                        "HTTP %d (attempt %d/%d), retrying in %ds: %s",
+                        e.status, attempt + 1, max_retries, wait, url,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    raise
+            except aiohttp.ClientError as e:
+                last_error = e
+                wait = 2 ** attempt
+                log.warning(
+                    "Network error (attempt %d/%d), retrying in %ds: %s — %s",
+                    attempt + 1, max_retries, wait, url, e,
+                )
+                await asyncio.sleep(wait)
+
+        raise last_error or Exception(f"Request failed after {max_retries} retries: {url}")
+
+    # ── Public API ─────────────────────────────────────────────────────
+
+    async def get(self, url: str, *, headers: dict | None = None, ttl: int = 300, **kwargs) -> str:
+        """GET request — cached by default."""
+        return await self._request("GET", url, headers=headers, ttl=ttl, **kwargs)
+
+    async def get_no_cache(self, url: str, *, headers: dict | None = None, **kwargs) -> str:
+        """GET request — bypass cache."""
+        return await self._request("GET", url, headers=headers, ttl=0, no_cache=True, **kwargs)
+
+    async def get_text_no_cache(self, url: str, *, headers: dict | None = None, **kwargs) -> str:
+        """Alias for get_no_cache."""
+        return await self.get_no_cache(url, headers=headers, **kwargs)
+
+    async def get_json(self, url: str, *, headers: dict | None = None, ttl: int = 300, **kwargs) -> Any:
+        """GET request and parse JSON."""
+        text = await self.get(url, headers=headers, ttl=ttl, **kwargs)
+        return json.loads(text)
+
+    async def post(self, url: str, *, data: dict | None = None, headers: dict | None = None, ttl: int = 0, **kwargs) -> str:
+        """POST request — not cached by default."""
+        return await self._request("POST", url, data=data, headers=headers, ttl=ttl, **kwargs)
+
+    async def post_no_cache(self, url: str, *, data: dict | None = None, headers: dict | None = None, **kwargs) -> str:
+        """POST request — bypass cache."""
+        return await self._request("POST", url, data=data, headers=headers, ttl=0, no_cache=True, **kwargs)
 
     async def get_with_redirects(
-        self, url: str, *, headers: dict | None = None, max_redirects: int = 10
+        self, url: str, *, headers: dict | None = None, **kwargs
     ) -> tuple[str, str]:
         """
-        Follow redirects manually and return ``(final_url, body_text)``.
-
-        Useful when you need to know the final landing URL after a chain
-        of 301/302/meta-refresh redirects.
+        GET request that follows redirects.
+        Returns (final_url, response_text).
         """
-        await self.start()
-        merged = dict(self._session.headers)
+        if self._is_cloudflare_domain(url):
+            loop = asyncio.get_event_loop()
+
+            def _do_get():
+                merged_headers = dict(DEFAULT_HEADERS)
+                if headers:
+                    merged_headers.update(headers)
+                resp = self._cloudscraper.get(
+                    url, headers=merged_headers, timeout=30, allow_redirects=True
+                )
+                resp.raise_for_status()
+                return resp.url, resp.text
+
+            return await loop.run_in_executor(None, _do_get)
+
+        # Use aiohttp
+        merged_headers = dict(DEFAULT_HEADERS)
         if headers:
-            merged.update(headers)
+            merged_headers.update(headers)
 
-        current_url = url
-        for _ in range(max_redirects):
-            async with self._session.get(
-                current_url,
-                headers=merged,
-                allow_redirects=False,
-            ) as r:
-                if r.status in (301, 302, 303, 307, 308):
-                    location = r.headers.get("Location", "")
-                    if not location:
-                        break
-                    # Handle relative redirects
-                    if not location.startswith("http"):
-                        from urllib.parse import urljoin
-                        location = urljoin(current_url, location)
-                    current_url = location
-                    continue
+        async with self._lock:
+            session = self._session
+        if session is None or session.closed:
+            await self.start()
+            session = self._session
 
-                # Not a redirect — read the body
-                text = await r.text()
-                return (str(r.url), text)
-
-        # Fell through max redirects — do a normal fetch of current URL
-        async with self._session.get(current_url, headers=merged) as r:
-            text = await r.text()
-            return (str(r.url), text)
+        async with session.get(
+            url, headers=merged_headers, allow_redirects=True, **kwargs
+        ) as resp:
+            resp.raise_for_status()
+            text = await resp.text()
+            final_url = str(resp.url)
+            return final_url, text
 
     async def post_follow_redirects(
-        self, url: str, *, data: dict, headers: dict | None = None,
-        max_redirects: int = 10,
+        self, url: str, *, data: dict | None = None, headers: dict | None = None, **kwargs
     ) -> tuple[str, str]:
         """
-        POST form data, follow redirects manually, return ``(body_text, final_url)``.
+        POST request that follows redirects.
+        Returns (response_text, final_url).
         """
-        await self.start()
-        merged = dict(self._session.headers)
+        if self._is_cloudflare_domain(url):
+            # Use cloudscraper (follows redirects automatically)
+            loop = asyncio.get_event_loop()
+
+            def _do_post():
+                merged_headers = dict(DEFAULT_HEADERS)
+                if headers:
+                    merged_headers.update(headers)
+                resp = self._cloudscraper.post(
+                    url, data=data, headers=merged_headers, timeout=30, allow_redirects=True
+                )
+                resp.raise_for_status()
+                return resp.text, resp.url
+
+            text, final_url = await loop.run_in_executor(None, _do_post)
+            return text, final_url
+
+        # Use aiohttp
+        merged_headers = dict(DEFAULT_HEADERS)
         if headers:
-            merged.update(headers)
+            merged_headers.update(headers)
 
-        # First request is POST
-        async with self._session.post(
-            url, data=data, headers=merged, allow_redirects=False,
-        ) as r:
-            if r.status in (301, 302, 303, 307, 308):
-                location = r.headers.get("Location", "")
-                if location:
-                    if not location.startswith("http"):
-                        from urllib.parse import urljoin
-                        location = urljoin(url, location)
-                    # Follow remaining redirects with GET
-                    final_url, text = await self.get_with_redirects(
-                        location, headers=headers
-                    )
-                    return (text, final_url)
-            text = await r.text()
-            return (text, str(r.url))
+        async with self._lock:
+            session = self._session
+        if session is None or session.closed:
+            await self.start()
+            session = self._session
 
-    async def head_follow(self, url: str) -> str:
-        """Follow redirects via HEAD and return the final URL (no body)."""
-        await self.start()
-        async with self._session.head(url, allow_redirects=True) as r:
-            return str(r.url)
+        async with session.post(
+            url, data=data, headers=merged_headers, allow_redirects=True, **kwargs
+        ) as resp:
+            resp.raise_for_status()
+            text = await resp.text()
+            final_url = str(resp.url)
+            return text, final_url
 
 
-http_client = HttpClient()
+# ── Singleton ──────────────────────────────────────────────────────────
+
+http_client = HTTPClient()

@@ -112,11 +112,44 @@ class AnimeDekhoAPI:
     async def get_episode(self, ep_slug: str) -> Episode:
         url = f"{cfg.base_url}{cfg.episode_path}/{ep_slug}/"
         html = await http_client.get(url)
+
+        # The site requires visiting a verification shortlink before
+        # server data is shown. Extract and visit it, then re-fetch.
+        shortlink_match = re.search(
+            r'name=["\']shortlink["\'][^>]*value=["\']([^"\']+)["\']',
+            html,
+        )
+        if shortlink_match:
+            shortlink = shortlink_match.group(1)
+            log.debug("Visiting verification shortlink: %s", shortlink)
+            try:
+                # Visit the shortlink — this sets the verification cookie
+                await http_client.get_no_cache(shortlink)
+                # Re-fetch the episode page — servers are now visible
+                html = await http_client.get_no_cache(url)
+            except Exception as e:
+                log.warning("Verification shortlink failed: %s", e)
+
         return parse_episode_page(html, ep_slug)
 
     async def get_movie(self, slug: str) -> Movie:
         url = f"{cfg.base_url}/movie-hindi/{slug}/"
         html = await http_client.get(url)
+
+        # Same verification shortlink flow as episodes
+        shortlink_match = re.search(
+            r'name=["\']shortlink["\'][^>]*value=["\']([^"\']+)["\']',
+            html,
+        )
+        if shortlink_match:
+            shortlink = shortlink_match.group(1)
+            log.debug("Visiting verification shortlink: %s", shortlink)
+            try:
+                await http_client.get_no_cache(shortlink)
+                html = await http_client.get_no_cache(url)
+            except Exception as e:
+                log.warning("Verification shortlink failed: %s", e)
+
         return parse_movie_page(html, slug)
 
     # ── Video server resolution ───────────────────────────────────
