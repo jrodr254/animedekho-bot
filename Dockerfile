@@ -36,7 +36,7 @@ COPY . .
 RUN mkdir -p /app/data
 
 # Prevent N_m3u8DL-RE Spectre.Console crash in headless containers
-ENV TERM=dumb
+ENV TERM=xterm
 ENV DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION=0
 
 CMD ["python", "main.py"]

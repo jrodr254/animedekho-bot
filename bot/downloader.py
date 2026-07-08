@@ -209,7 +209,7 @@ async def n_m3u8dl_re_download(
         "--download-retry-count", "5",
         "--binary-merge",
         "--no-ansi-color",
-        "--mux-after-done", "format=mp4",
+        "-M", "format=mp4",
         "--select-audio", "all",
         "--select-subtitle", "all",
         "--header", f"Referer: {origin}/",
@@ -225,11 +225,11 @@ async def n_m3u8dl_re_download(
     import shlex
     shell_cmd = " ".join(shlex.quote(c) for c in cmd)
     env = os.environ.copy()
-    env["TERM"] = "dumb"
+    env["TERM"] = "xterm"
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "script", "-qc", shell_cmd, "/dev/null",
+            "script", "-q", "/dev/null", "-c", shell_cmd,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
         )
     except FileNotFoundError:
