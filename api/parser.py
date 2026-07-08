@@ -194,7 +194,13 @@ def parse_episode_page(html: str, ep_slug: str) -> Episode:
                 try:
                     decoded = base64.b64decode(data_src).decode("utf-8")
                     srv_match = RE_TRDEKHO.search(decoded)
-                    srv_id = int(srv_match.group(1)) if srv_match else -1
+                    if srv_match:
+                        srv_id = int(srv_match.group(1))
+                    elif "/embed/" in decoded:
+                        # New VidStream format: /embed/{post_id}/{season}-{ep}
+                        srv_id = 0  # VidStream
+                    else:
+                        srv_id = -1
                     servers.append(VideoServer(
                         name=name or f"Server {srv_id}",
                         server_id=srv_id,
@@ -258,7 +264,12 @@ def parse_movie_page(html: str, slug: str) -> Movie:
                 try:
                     decoded = base64.b64decode(data_src).decode("utf-8")
                     srv_match = RE_TRDEKHO.search(decoded)
-                    srv_id = int(srv_match.group(1)) if srv_match else -1
+                    if srv_match:
+                        srv_id = int(srv_match.group(1))
+                    elif "/embed/" in decoded:
+                        srv_id = 0  # VidStream
+                    else:
+                        srv_id = -1
                     servers.append(VideoServer(
                         name=name, server_id=srv_id, proxy_url=decoded,
                     ))

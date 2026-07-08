@@ -36,8 +36,9 @@ class AnimeDekhoAPI:
         # Try multiple URLs to get nonce — some may be blocked by CF
         urls_to_try = [
             f"{cfg.base_url}/home/",
-            f"{cfg.base_url}/",
             f"{cfg.base_url}/series-hindi/",
+            f"{cfg.base_url}/movies-hindi/",
+            f"{cfg.base_url}/",
         ]
         last_error = None
         for url in urls_to_try:
@@ -200,8 +201,16 @@ class AnimeDekhoAPI:
             iframe_match = re.search(r'<iframe[^>]*src\s*=\s*["\']([^"\']+)["\']', html, re.IGNORECASE)
             if iframe_match:
                 iframe_src = iframe_match.group(1)
-                # The iframe URL itself might be a shortener
-                iframe_src = await detect_and_bypass(iframe_src)
+                # Skip shortener bypass for known player/CDN domains
+                _player_domains = ("as-cdn", "fireplayer", "vidmoly", "streamwish",
+                                   "swish", "playerwish", "filemoon", "kerapoxy",
+                                   "doodstream", "dood.", "streamtape", "strtape",
+                                   "mp4upload", "vidguard", "vgfplay", "vimeo",
+                                   "megacloud", "rabbitstream", "vidstream",
+                                   "zephyrflick")
+                iframe_lower = iframe_src.lower()
+                if not any(d in iframe_lower for d in _player_domains):
+                    iframe_src = await detect_and_bypass(iframe_src)
                 server.player_url = iframe_src
             else:
                 # Step 4: Check for shortener links in the page body

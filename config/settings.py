@@ -23,11 +23,13 @@ class SiteConfig:
     server_ids: dict = field(default_factory=lambda: {
         0: "VidStream",
         1: "HydraX",
-        2: "Vidmoly",
-        3: "Server 4",
+        2: "SRuby",
+        3: "MirrorBot",
         4: "Server 5",
-        6: "Server 6",
-        8: "Server 7",
+        5: "VidCloud",
+        6: "Strmup",
+        7: "Omega",
+        8: "Vidmoly",
     })
     # Server priority order: VidStream first, HydraX fallback, Vidmoly last resort
     preferred_servers: list = field(default_factory=lambda: ["VidStream", "HydraX", "Vidmoly"])
