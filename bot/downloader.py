@@ -1,11 +1,10 @@
-"""Download manager — architecture-aware: N_m3u8DL-RE (x86_64) or yt-dlp (ARM64)."""
+"""Download manager — N_m3u8DL-RE only. Downloads video + all audio tracks simultaneously."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import platform
 import re
 import shutil
 import tempfile
@@ -20,13 +19,6 @@ from api.models import Quality
 log = logging.getLogger(__name__)
 
 TG_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024
-
-# Architecture detection
-_ARCH = platform.machine().lower()
-IS_ARM = "aarch64" in _ARCH or "arm" in _ARCH
-IS_X86 = "x86_64" in _ARCH or "amd64" in _ARCH
-
-log.info("Detected architecture: %s (ARM=%s, x86=%s)", _ARCH, IS_ARM, IS_X86)
 
 _TEMP_DIR = Path(tempfile.gettempdir()) / "animedekho_dl"
 _TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -65,7 +57,6 @@ def _progress_bar(pct: float, width: int = 20) -> str:
     """Smooth animated progress bar with gradient fill."""
     filled_exact = pct / 100 * width
     filled = int(filled_exact)
-    # Sub-block characters for smooth partial fill
     partials = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
     partial_idx = int((filled_exact - filled) * len(partials))
 
@@ -102,22 +93,20 @@ def _format_speed(bps: float) -> str:
 
 
 def _calc_eta(pct: float, elapsed: float) -> str:
-    """Calculate estimated time remaining."""
     if pct <= 0 or elapsed <= 0:
         return "calculating..."
     remaining = elapsed / pct * (100 - pct)
     return _format_time(remaining)
 
 
-def _download_progress_text(title, quality, pct, size_bytes, elapsed, speed, eta="", engine=""):
-    eng = f" · {engine}" if engine else ""
+def _download_progress_text(title, quality, pct, size_bytes, elapsed, speed, eta=""):
     spin = _spinner()
     speed_str = _format_speed(speed) if speed > 0 else "⏳ starting..."
     bar = _progress_bar(pct)
     eta_str = eta or _calc_eta(pct, elapsed)
 
     lines = [
-        f"{spin} <b>⬇️ Downloading{eng}</b>",
+        f"{spin} <b>⬇️ Downloading</b>",
         f"",
         f"<b>{title}</b>",
         f"🎬 {quality}",
@@ -186,226 +175,7 @@ def _get_origin(url: str) -> str:
     return origin
 
 
-# ── yt-dlp (PRIMARY — works on all architectures) ────────────────────
-
-
-async def ytdlp_download(
-    stream_url: str,
-    quality: str,
-    output_path: str,
-    progress_msg: Message | None = None,
-    title: str = "video",
-) -> bool:
-    """Download HLS stream using yt-dlp. Handles master m3u8 natively."""
-    log.info("yt-dlp download: url=%s quality=%s", stream_url[:120], quality)
-    last_edit = [0.0]
-    start_time = time.time()
-
-    if progress_msg:
-        await _update_progress(progress_msg,
-            _download_progress_text(title, quality, 0, 0, 0, 0, "", "yt-dlp"), [0])
-
-    origin = _get_origin(stream_url)
-
-    # Map quality to height for format selection
-    height = quality.replace("p", "") if quality.endswith("p") and quality[:-1].isdigit() else ""
-
-    cmd = [
-        "yt-dlp",
-        stream_url,
-        "-o", output_path,
-        "--no-warnings",
-        "--no-check-certificates",
-        "--referer", f"{origin}/",
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "--merge-output-format", "mp4",
-        "--concurrent-fragments", "4",
-        "--retries", "10",
-        "--fragment-retries", "10",
-        "--retry-sleep", "linear=1::5",
-        "--socket-timeout", "30",
-        "--audio-multistreams",
-    ]
-
-    if height:
-        cmd.extend(["-f", f"bv*[height={height}]+ba*/bv*[height<={height}]+ba*/b"])
-    else:
-        cmd.extend(["-f", "bv*+ba*/b"])
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-
-    # Track progress state parsed from yt-dlp output
-    _dl_state = {"pct": 0.0, "size": 0, "speed": 0.0, "eta": ""}
-
-    async def _read_output():
-        """Parse yt-dlp stdout for real progress info.
-        yt-dlp uses \\r for progress lines, so we read chunks not lines."""
-        pct_re = re.compile(r'(\d+(?:\.\d+)?)%')
-        size_re = re.compile(r'of\s+~?\s*([\d.]+)(Ki?B|Mi?B|Gi?B)')
-        speed_re = re.compile(r'at\s+([\d.]+)(Ki?B|Mi?B|Gi?B)/s')
-        eta_re = re.compile(r'ETA\s+(\S+)')
-        frag_re = re.compile(r'fragment\s+(\d+)/(\d+)')
-
-        while True:
-            chunk = await proc.stdout.read(4096)
-            if not chunk:
-                break
-            text = chunk.decode(errors="replace")
-            # Split on both \r and \n
-            for line in re.split(r'[\r\n]+', text):
-                line = line.strip()
-                if not line:
-                    continue
-
-                # Parse percentage
-                m = pct_re.search(line)
-                if m:
-                    _dl_state["pct"] = min(99.0, float(m.group(1)))
-
-                # Parse fragment progress (for HLS)
-                m = frag_re.search(line)
-                if m:
-                    done, total = int(m.group(1)), int(m.group(2))
-                    if total > 0:
-                        _dl_state["pct"] = min(99.0, done / total * 100)
-
-                # Parse total size
-                m = size_re.search(line)
-                if m:
-                    val = float(m.group(1))
-                    unit = m.group(2).upper()
-                    if "G" in unit: val *= 1024**3
-                    elif "M" in unit: val *= 1024**2
-                    elif "K" in unit: val *= 1024
-                    _dl_state["size"] = int(val)
-
-                # Parse speed
-                m = speed_re.search(line)
-                if m:
-                    val = float(m.group(1))
-                    unit = m.group(2).upper()
-                    if "G" in unit: val *= 1024**3
-                    elif "M" in unit: val *= 1024**2
-                    elif "K" in unit: val *= 1024
-                    _dl_state["speed"] = val
-
-                # Parse ETA
-                m = eta_re.search(line)
-                if m:
-                    _dl_state["eta"] = m.group(1)
-
-    _stall_detected = asyncio.Event()
-    _STALL_TIMEOUT = 180  # Kill if no new data for 3 minutes (allows retries)
-
-    async def _monitor():
-        last_disk_size = 0
-        last_disk_time = time.time()
-        last_change_time = time.time()
-        while proc.returncode is None:
-            await asyncio.sleep(3)
-            try:
-                # Always track actual file size on disk
-                disk_size = 0
-                if os.path.exists(output_path):
-                    disk_size = os.path.getsize(output_path)
-                if disk_size == 0:
-                    stem = Path(output_path).stem
-                    disk_size = sum(
-                        f.stat().st_size for f in _TEMP_DIR.glob("**/*")
-                        if f.is_file() and (stem in f.name or f.suffix in (".part", ".mp4", ".ts", ".m4s"))
-                    )
-
-                # Use disk size as authoritative size
-                _dl_state["size"] = max(_dl_state["size"], disk_size)
-
-                # Calculate speed from disk size changes
-                now = time.time()
-                dt = now - last_disk_time
-                if dt > 1:
-                    if disk_size > last_disk_size:
-                        _dl_state["speed"] = (disk_size - last_disk_size) / dt
-                        last_change_time = now
-                    elif disk_size == last_disk_size and disk_size > 0:
-                        # No progress — check for stall
-                        _dl_state["speed"] = 0
-                        if now - last_change_time > _STALL_TIMEOUT:
-                            log.warning("yt-dlp stalled for %ds, killing", _STALL_TIMEOUT)
-                            _stall_detected.set()
-                            proc.kill()
-                            break
-                last_disk_size = disk_size
-                last_disk_time = now
-
-                # If yt-dlp didn't give us %, estimate from file size
-                if _dl_state["pct"] == 0 and disk_size > 0:
-                    est_total = {"1080p": 400, "720p": 200, "480p": 100, "360p": 60, "240p": 30}.get(quality, 200) * 1024 * 1024
-                    _dl_state["pct"] = min(95.0, disk_size / est_total * 100)
-
-                elapsed = time.time() - start_time
-                stall_info = ""
-                if _dl_state["speed"] == 0 and disk_size > 0:
-                    stall_secs = int(now - last_change_time)
-                    if stall_secs > 10:
-                        stall_info = f"\n⚠️ Stalled for {stall_secs}s..."
-                if progress_msg:
-                    await _update_progress(progress_msg,
-                        _download_progress_text(
-                            title, quality, _dl_state["pct"],
-                            _dl_state["size"], elapsed,
-                            _dl_state["speed"], _dl_state["eta"], "yt-dlp") + stall_info,
-                        last_edit, interval=3.0)
-            except Exception:
-                pass
-
-    read_task = asyncio.create_task(_read_output())
-    monitor_task = asyncio.create_task(_monitor())
-
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=2400)
-    except asyncio.TimeoutError:
-        proc.kill()
-        log.error("yt-dlp timed out for %s", stream_url[:60])
-        return False
-    finally:
-        for t in (read_task, monitor_task):
-            t.cancel()
-            try: await t
-            except asyncio.CancelledError: pass
-
-    if _stall_detected.is_set():
-        log.warning("yt-dlp was killed due to stall for %s", stream_url[:60])
-        # Clean up partial file so retry starts fresh
-        try:
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            stem = Path(output_path).stem
-            for f in _TEMP_DIR.glob(f"*{stem}*"):
-                f.unlink(missing_ok=True)
-        except Exception:
-            pass
-        return False
-
-    if proc.returncode != 0:
-        log.error("yt-dlp failed (%d)", proc.returncode)
-        return False
-
-    # yt-dlp might create .mp4 or different extension
-    if not os.path.exists(output_path):
-        stem = Path(output_path).stem
-        for ext in [".mp4", ".mkv", ".webm"]:
-            alt = str(Path(output_path).parent / f"{stem}{ext}")
-            if os.path.exists(alt) and alt != output_path:
-                os.rename(alt, output_path)
-                break
-
-    return os.path.exists(output_path) and os.path.getsize(output_path) > 0
-
-
-# ── N_m3u8DL-RE (FALLBACK) ───────────────────────────────────────────
+# ── N_m3u8DL-RE (PRIMARY & ONLY engine) ──────────────────────────────
 
 
 async def n_m3u8dl_re_download(
@@ -415,10 +185,12 @@ async def n_m3u8dl_re_download(
     progress_msg: Message | None = None,
     title: str = "video",
 ) -> bool:
-    """Download using N_m3u8DL-RE (may not work on ARM64)."""
+    """Download using N_m3u8DL-RE — video + all audio tracks simultaneously."""
     if not shutil.which("N_m3u8DL-RE"):
+        log.error("N_m3u8DL-RE not found in PATH!")
         return False
 
+    log.info("N_m3u8DL-RE download: url=%s quality=%s", stream_url[:120], quality)
     last_edit = [0.0]
     start_time = time.time()
 
@@ -426,20 +198,24 @@ async def n_m3u8dl_re_download(
     save_dir = str(Path(output_path).parent)
     origin = _get_origin(stream_url)
 
+    height = quality.replace("p", "") if quality.endswith("p") and quality[:-1].isdigit() else ""
+
     cmd = [
         "N_m3u8DL-RE", stream_url,
         "--save-dir", save_dir, "--save-name", stem,
         "--tmp-dir", str(_SEGMENTS_DIR),
-        "--del-after-done", "--thread-count", "16",
-        "--download-retry-count", "5", "--binary-merge",
+        "--del-after-done",
+        "--thread-count", "16",
+        "--download-retry-count", "5",
+        "--binary-merge",
         "--no-ansi-color",
         "--mux-after-done", "format=mp4",
-        "--select-audio", "all", "--select-subtitle", "all",
+        "--select-audio", "all",
+        "--select-subtitle", "all",
         "--header", f"Referer: {origin}/",
         "--header", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     ]
 
-    height = quality.replace("p", "") if quality.endswith("p") and quality[:-1].isdigit() else ""
     if height:
         cmd.extend(["--select-video", f"res={height}*"])
     else:
@@ -457,32 +233,60 @@ async def n_m3u8dl_re_download(
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
         )
     except FileNotFoundError:
-        # script command not available
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
         )
 
+    # ── Progress monitoring via disk size ──
+    _STALL_TIMEOUT = 180  # Kill if no new data for 3 minutes
+    _stall_detected = asyncio.Event()
+
     async def _monitor():
         last_size = 0
         last_time = time.time()
+        last_change_time = time.time()
         while proc.returncode is None:
             await asyncio.sleep(3)
             try:
-                total = sum(f.stat().st_size for f in Path(save_dir).glob("**/*")
-                           if f.is_file() and (stem in f.name or f.suffix in (".ts", ".m4s", ".mp4")))
+                # Track total bytes across all temp files
+                total = sum(
+                    f.stat().st_size for f in Path(save_dir).glob("**/*")
+                    if f.is_file() and (stem in f.name or f.suffix in (".ts", ".m4s", ".mp4", ".m4a"))
+                )
                 total += sum(f.stat().st_size for f in _SEGMENTS_DIR.glob("**/*") if f.is_file())
+
                 now = time.time()
                 dt = now - last_time
                 speed = max(0, (total - last_size)) / dt if dt > 0 else 0
+
+                if total > last_size:
+                    last_change_time = now
+                elif total == last_size and total > 0:
+                    if now - last_change_time > _STALL_TIMEOUT:
+                        log.warning("N_m3u8DL-RE stalled for %ds, killing", _STALL_TIMEOUT)
+                        _stall_detected.set()
+                        proc.kill()
+                        break
+
                 last_size = total
                 last_time = now
                 elapsed = now - start_time
-                # Estimate % from file size (rough for m3u8)
-                est_total = {"1080p": 400, "720p": 200, "480p": 100}.get(quality, 200) * 1024 * 1024
+
+                # Estimate % from file size
+                est_total = {
+                    "1080p": 400, "720p": 200, "480p": 100, "360p": 60, "240p": 30
+                }.get(quality, 200) * 1024 * 1024
                 pct = min(95, total / est_total * 100) if est_total > 0 else 0
+
+                stall_info = ""
+                if speed == 0 and total > 0:
+                    stall_secs = int(now - last_change_time)
+                    if stall_secs > 10:
+                        stall_info = f"\n⚠️ Stalled for {stall_secs}s..."
+
                 if progress_msg and total > 100_000:
                     await _update_progress(progress_msg,
-                        _download_progress_text(title, quality, pct, total, elapsed, speed, "", "N_m3u8DL-RE"),
+                        _download_progress_text(title, quality, pct, total, elapsed, speed) + stall_info,
                         last_edit, interval=3.0)
             except Exception:
                 pass
@@ -492,14 +296,27 @@ async def n_m3u8dl_re_download(
         await asyncio.wait_for(proc.wait(), timeout=2400)
     except asyncio.TimeoutError:
         proc.kill()
-        monitor_task.cancel()
+        log.error("N_m3u8DL-RE timed out for %s", stream_url[:60])
         return False
     finally:
         monitor_task.cancel()
-        try: await monitor_task
-        except asyncio.CancelledError: pass
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
 
-    # Check output (script may return 0 even on failure)
+    if _stall_detected.is_set():
+        log.warning("N_m3u8DL-RE was killed due to stall for %s", stream_url[:60])
+        try:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            for f in _TEMP_DIR.glob(f"*{stem}*"):
+                f.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+    # Check output — N_m3u8DL-RE may produce .mp4 or other extensions
     if not os.path.exists(output_path):
         for ext in [".mp4", ".mkv", ".ts"]:
             alt = str(Path(save_dir) / f"{stem}{ext}")
@@ -508,243 +325,12 @@ async def n_m3u8dl_re_download(
                 break
 
     success = os.path.exists(output_path) and os.path.getsize(output_path) > 0
-    if not success:
-        log.error("N_m3u8DL-RE produced no output")
+    if success:
+        log.info("N_m3u8DL-RE download complete: %s (%s)",
+                 output_path, _format_size(os.path.getsize(output_path)))
+    else:
+        log.error("N_m3u8DL-RE produced no output for %s", stream_url[:60])
     return success
-
-
-# ── ffmpeg direct (for multi-audio HLS) ──────────────────────────────
-
-
-async def ffmpeg_hls_download(
-    stream_url: str,
-    quality: str,
-    output_path: str,
-    progress_msg: Message | None = None,
-    title: str = "video",
-) -> bool:
-    """Download HLS with ALL audio tracks by downloading video + each audio separately, then merging."""
-    if not shutil.which("ffmpeg") or not shutil.which("yt-dlp"):
-        log.warning("ffmpeg or yt-dlp not found for multi-audio download")
-        return False
-
-    log.info("multi-audio download: url=%s quality=%s", stream_url[:120], quality)
-    last_edit = [0.0]
-    start_time = time.time()
-
-    origin = _get_origin(stream_url)
-    height = quality.replace("p", "") if quality.endswith("p") and quality[:-1].isdigit() else ""
-
-    # Parse audio track URLs from master m3u8
-    audio_tracks = await _parse_audio_tracks(stream_url, origin)
-    if not audio_tracks:
-        log.info("No separate audio tracks found in master m3u8")
-        return False
-
-    log.info("Found %d audio tracks: %s", len(audio_tracks),
-             ", ".join(f"{t['name']} ({t['lang']})" for t in audio_tracks))
-
-    stem = Path(output_path).stem
-    tmp_dir = _TEMP_DIR / f"{stem}_tracks"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        # Step 1: Download video only with yt-dlp
-        video_path = str(tmp_dir / "video.mp4")
-        if progress_msg:
-            await _update_progress(progress_msg,
-                _download_progress_text(title, quality, 0, 0, 0, 0, "", "video"), [0])
-
-        vid_fmt = f"bv*[height={height}]/bv*/b" if height else "bv*/b"
-        vid_cmd = [
-            "yt-dlp", stream_url, "-o", video_path,
-            "--no-warnings", "--no-check-certificates",
-            "--referer", f"{origin}/",
-            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "--merge-output-format", "mp4",
-            "-f", vid_fmt,
-            "--concurrent-fragments", "4",
-            "--retries", "10", "--fragment-retries", "10",
-            "--socket-timeout", "30",
-        ]
-
-        vid_proc = await asyncio.create_subprocess_exec(
-            *vid_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-
-        async def _drain(p):
-            while True:
-                chunk = await p.stdout.read(4096)
-                if not chunk:
-                    break
-
-        async def _vid_monitor():
-            while vid_proc.returncode is None:
-                await asyncio.sleep(3)
-                try:
-                    size = os.path.getsize(video_path) if os.path.exists(video_path) else 0
-                    elapsed = time.time() - start_time
-                    if progress_msg and size > 50_000:
-                        pct_est = min(60, size / ({"1080p": 300, "720p": 150, "480p": 80}.get(quality, 150) * 1024 * 1024) * 60)
-                        await _update_progress(progress_msg,
-                            _download_progress_text(title, quality, pct_est, size, elapsed, 0, "", "video"), last_edit, interval=3.0)
-                except Exception:
-                    pass
-
-        drain_task = asyncio.create_task(_drain(vid_proc))
-        mon_task = asyncio.create_task(_vid_monitor())
-        try:
-            await asyncio.wait_for(vid_proc.wait(), timeout=1800)
-        except asyncio.TimeoutError:
-            vid_proc.kill()
-        finally:
-            for t in (drain_task, mon_task):
-                t.cancel()
-                try: await t
-                except asyncio.CancelledError: pass
-
-        if not os.path.exists(video_path):
-            # Check alternative extensions
-            for ext in [".mp4", ".mkv", ".webm"]:
-                alt = str(tmp_dir / f"video{ext}")
-                if os.path.exists(alt):
-                    os.rename(alt, video_path)
-                    break
-
-        if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
-            log.error("Video download failed")
-            return False
-
-        log.info("Video downloaded: %s (%s)", video_path, _format_size(os.path.getsize(video_path)))
-
-        # Step 2: Download each audio track with yt-dlp
-        audio_paths = []
-        for i, track in enumerate(audio_tracks):
-            audio_path = str(tmp_dir / f"audio_{track['lang']}.m4a")
-            audio_url = track["url"]
-
-            if progress_msg:
-                pct = 60 + (i / len(audio_tracks)) * 30
-                await _update_progress(progress_msg,
-                    _download_progress_text(title, quality, pct, 0, time.time() - start_time, 0,
-                                            "", f"audio: {track['name']}"),
-                    last_edit, interval=2.0)
-
-            audio_cmd = [
-                "yt-dlp", audio_url, "-o", audio_path,
-                "--no-warnings", "--no-check-certificates",
-                "--referer", f"{origin}/",
-                "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "-f", "ba/b",
-                "--retries", "10", "--fragment-retries", "10",
-                "--socket-timeout", "30",
-            ]
-
-            a_proc = await asyncio.create_subprocess_exec(
-                *audio_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-            a_drain = asyncio.create_task(_drain(a_proc))
-            try:
-                await asyncio.wait_for(a_proc.wait(), timeout=600)
-            except asyncio.TimeoutError:
-                a_proc.kill()
-            finally:
-                a_drain.cancel()
-                try: await a_drain
-                except asyncio.CancelledError: pass
-
-            # Check for the file with various extensions
-            if not os.path.exists(audio_path):
-                for ext in [".m4a", ".mp4", ".webm", ".ogg", ".opus"]:
-                    alt = str(tmp_dir / f"audio_{track['lang']}{ext}")
-                    if os.path.exists(alt) and alt != audio_path:
-                        audio_path = alt
-                        break
-
-            if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
-                audio_paths.append({"path": audio_path, "lang": track["lang"], "name": track["name"]})
-                log.info("Audio downloaded: %s (%s) - %s", track["name"], track["lang"],
-                         _format_size(os.path.getsize(audio_path)))
-            else:
-                log.warning("Audio track failed: %s (%s)", track["name"], track["lang"])
-
-        if not audio_paths:
-            log.error("No audio tracks downloaded")
-            return False
-
-        # Step 3: Merge video + all audio tracks with ffmpeg
-        if progress_msg:
-            await _update_progress(progress_msg,
-                _download_progress_text(title, quality, 92, 0, time.time() - start_time, 0, "", "merging"),
-                last_edit, interval=1.0)
-
-        merge_cmd = ["ffmpeg", "-y", "-loglevel", "warning"]
-        merge_cmd.extend(["-i", video_path])
-        for ap in audio_paths:
-            merge_cmd.extend(["-i", ap["path"]])
-
-        # Map video from first input
-        merge_cmd.extend(["-map", "0:v:0"])
-        # Map audio from each input
-        for i in range(len(audio_paths)):
-            merge_cmd.extend(["-map", f"{i+1}:a:0"])
-
-        merge_cmd.extend(["-c", "copy", "-movflags", "+faststart"])
-
-        # Set audio track metadata (language + title)
-        for i, ap in enumerate(audio_paths):
-            merge_cmd.extend([
-                f"-metadata:s:a:{i}", f"language={ap['lang']}",
-                f"-metadata:s:a:{i}", f"title={ap['name']}",
-            ])
-
-        merge_cmd.append(output_path)
-
-        log.info("Merging: video + %d audio tracks", len(audio_paths))
-        m_proc = await asyncio.create_subprocess_exec(
-            *merge_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        _, m_stderr = await asyncio.wait_for(m_proc.communicate(), timeout=300)
-
-        if m_proc.returncode != 0:
-            log.error("ffmpeg merge failed (%d): %s", m_proc.returncode,
-                      m_stderr.decode(errors="replace")[-500:] if m_stderr else "")
-            return False
-
-        success = os.path.exists(output_path) and os.path.getsize(output_path) > 0
-        if success:
-            log.info("Multi-audio merge complete: %s (%s, %d audio tracks)",
-                     output_path, _format_size(os.path.getsize(output_path)), len(audio_paths))
-        return success
-
-    finally:
-        # Cleanup temp track files
-        try:
-            import shutil as _shutil
-            _shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
-
-
-async def _parse_audio_tracks(master_url: str, origin: str) -> list[dict]:
-    """Parse #EXT-X-MEDIA:TYPE=AUDIO entries from master m3u8."""
-    from urllib.parse import urljoin
-    try:
-        from utils.http import http_client
-        headers = {"Referer": f"{origin}/"}
-        content = await http_client.get(master_url, headers=headers, ttl=60)
-
-        tracks = []
-        for m in re.finditer(
-            r'#EXT-X-MEDIA:TYPE=AUDIO[^\n]*LANGUAGE="([^"]*)"[^\n]*NAME="([^"]*)"[^\n]*URI="([^"]*)"',
-            content
-        ):
-            lang, name, uri = m.group(1), m.group(2), m.group(3)
-            # Resolve relative URIs
-            if not uri.startswith("http"):
-                uri = urljoin(master_url, uri)
-            tracks.append({"lang": lang, "name": name, "url": uri})
-        return tracks
-    except Exception as e:
-        log.warning("Failed to parse audio tracks: %s", e)
-        return []
 
 
 # ── Main download + upload ────────────────────────────────────────────
@@ -765,46 +351,15 @@ async def download_and_upload(
     overall_start = time.time()
 
     try:
-        success = False
-        is_m3u8 = ".m3u8" in stream_url.lower()
-
-        if is_m3u8:
-            # 1. Try ffmpeg first — reliably grabs ALL audio tracks
-            log.info("Trying ffmpeg (multi-audio) for %s", title[:50])
-            success = await ffmpeg_hls_download(
-                stream_url, quality, output_path, progress_msg, title)
-
-            # 2. Architecture-based fallback
-            if not success:
-                if IS_ARM:
-                    log.info("ffmpeg failed, trying yt-dlp (ARM64) for %s", title[:50])
-                    success = await ytdlp_download(
-                        stream_url, quality, output_path, progress_msg, title)
-                    if not success:
-                        log.info("yt-dlp failed, trying N_m3u8DL-RE for %s", title[:50])
-                        success = await n_m3u8dl_re_download(
-                            stream_url, quality, output_path, progress_msg, title)
-                else:
-                    log.info("ffmpeg failed, trying N_m3u8DL-RE (x86) for %s", title[:50])
-                    success = await n_m3u8dl_re_download(
-                        stream_url, quality, output_path, progress_msg, title)
-                    if not success:
-                        log.info("N_m3u8DL-RE failed, trying yt-dlp for %s", title[:50])
-                        success = await ytdlp_download(
-                            stream_url, quality, output_path, progress_msg, title)
-
-            if not success:
-                log.error("All download methods failed for %s", title)
-        else:
-            # Direct mp4 — use yt-dlp
-            success = await ytdlp_download(
-                stream_url, quality, output_path, progress_msg, title)
+        success = await n_m3u8dl_re_download(
+            stream_url, quality, output_path, progress_msg, title
+        )
 
         if not success:
             await progress_msg.edit_text(
                 f"❌ <b>Download Failed</b>\n"
                 f"┌ 📺 {title}\n"
-                f"└ 💔 Could not download from server",
+                f"└ 💔 N_m3u8DL-RE could not download from server",
                 parse_mode=enums.ParseMode.HTML)
             return False, None
 
