@@ -7,6 +7,7 @@ RUN apt-get update && \
     curl \
     ca-certificates \
     python3-pip \
+    bsdutils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install N_m3u8DL-RE binary (primary download engine)

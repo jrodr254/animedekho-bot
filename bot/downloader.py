@@ -222,19 +222,27 @@ async def n_m3u8dl_re_download(
         cmd.extend(["--auto-select"])
 
     # Use script PTY wrapper for Spectre.Console crash prevention
+    # Spectre.Console crashes with ArrayOutOfBounds in headless/no-TTY environments.
+    # script(1) allocates a PTY so N_m3u8DL-RE thinks it has a real terminal.
     import shlex
     shell_cmd = " ".join(shlex.quote(c) for c in cmd)
     env = os.environ.copy()
     env["TERM"] = "xterm"
+    env["DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION"] = "0"
 
-    try:
+    use_script = shutil.which("script") is not None
+
+    if use_script:
         proc = await asyncio.create_subprocess_exec(
             "script", "-q", "/dev/null", "-c", shell_cmd,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, env=env,
         )
-    except FileNotFoundError:
+    else:
+        # No script available — run directly but redirect to DEVNULL
+        # This MAY crash with Spectre.Console on some systems
+        log.warning("'script' command not found — N_m3u8DL-RE may crash in headless mode")
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, env=env,
         )
 
     # ── Progress monitoring via disk size ──
