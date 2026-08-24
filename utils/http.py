@@ -307,7 +307,13 @@ class HTTPClient:
     async def get_json(self, url: str, *, headers: dict | None = None, ttl: int = 300, **kwargs) -> Any:
         """GET request and parse JSON."""
         text = await self.get(url, headers=headers, ttl=ttl, **kwargs)
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            snippet = (text or "")[:120].replace("\n", " ")
+            raise ValueError(
+                f"Non-JSON response from {url} ({e}); body: {snippet!r}"
+            ) from e
 
     async def post(self, url: str, *, data: dict | None = None, headers: dict | None = None, ttl: int = 0, **kwargs) -> str:
         """POST request — not cached by default."""

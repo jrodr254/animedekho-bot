@@ -300,3 +300,29 @@ def parse_categories(data: list[dict]) -> list[Category]:
             ))
     cats.sort(key=lambda x: x.count, reverse=True)
     return cats[:20]
+
+
+def parse_categories_html(html: str) -> list[Category]:
+    """Scrape /category/<slug>/ links from site HTML.
+
+    Fallback when the WP REST API is blocked (Cloudflare) and returns
+    non-JSON content.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    seen: set[str] = set()
+    skip = {"uncategorized", "blog", "news", "uncategorised"}
+    cats = []
+    for a in soup.find_all("a", href=re.compile(r"/category/[^/]+/?")):
+        href = a.get("href", "")
+        m = re.search(r"/category/([^/#?]+)/?", href)
+        if not m:
+            continue
+        slug = unquote(m.group(1)).strip("/").lower()
+        name = a.get_text(strip=True)
+        if not slug or slug in seen or slug in skip:
+            continue
+        if not name or len(name) > 30 or name.lower() in skip:
+            continue
+        seen.add(slug)
+        cats.append(Category(id=0, name=name, slug=slug, count=0))
+    return cats[:20]

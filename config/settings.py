@@ -9,7 +9,7 @@ class SiteConfig:
     base_url: str = "https://animedekho.app"
     ajax_url: str = "https://animedekho.app/wp-admin/admin-ajax.php"
     series_path: str = "/series-hindi"
-    movies_path: str = "/movies-hindi"
+    movies_path: str = "/movie-hindi"
     episode_path: str = "/epi"
     embed_pattern: str = "https://animedekho.app/?trdekho={server}&trid={post_id}&trtype=2"
     category_api: str = "https://animedekho.app/wp-json/wp/v2/categories"

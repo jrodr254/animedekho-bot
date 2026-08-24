@@ -15,7 +15,8 @@ from .models import (
 from .parser import (
     parse_nonce, parse_search_html, parse_listing_page,
     parse_series_detail, parse_episode_page, parse_movie_page,
-    parse_categories, RE_SERIES_URL, RE_MOVIE_URL,
+    parse_categories, parse_categories_html,
+    RE_SERIES_URL, RE_MOVIE_URL,
 )
 
 log = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ class AnimeDekhoAPI:
         urls_to_try = [
             f"{cfg.base_url}/home/",
             f"{cfg.base_url}/series-hindi/",
-            f"{cfg.base_url}/movies-hindi/",
+            f"{cfg.base_url}/movie-hindi/",
             f"{cfg.base_url}/",
         ]
         last_error = None
@@ -270,9 +271,28 @@ class AnimeDekhoAPI:
     # ── Categories ────────────────────────────────────────────────
 
     async def get_categories(self) -> list[Category]:
+        # Primary: WP REST API (fast, includes item counts)
         url = f"{cfg.category_api}?per_page=50&orderby=count&order=desc&_fields=id,name,slug,count"
-        data = await http_client.get_json(url, ttl=settings.cache.categories_ttl)
-        return parse_categories(data)
+        try:
+            data = await http_client.get_json(url, ttl=settings.cache.categories_ttl)
+            cats = parse_categories(data)
+            if cats:
+                return cats
+        except Exception as e:
+            # wp-json is often Cloudflare-blocked and returns HTML instead
+            log.warning("Category API failed (%s), falling back to HTML scraping", e)
+
+        # Fallback: scrape /category/<slug>/ links from the site pages
+        for page_url in (f"{cfg.base_url}/", f"{cfg.base_url}{cfg.series_path}/"):
+            try:
+                html = await http_client.get(page_url, ttl=settings.cache.categories_ttl)
+                cats = parse_categories_html(html)
+                if cats:
+                    return cats
+            except Exception as e:
+                log.warning("Category scrape failed for %s: %s", page_url, e)
+
+        return []
 
     async def get_category_items(self, cat_slug: str, page: int = 1) -> PaginatedResult:
         url = f"{cfg.base_url}/category/{cat_slug}/"
