@@ -43,6 +43,10 @@ async def resolve_player_url(player_url: str) -> dict | None:
             result = await _resolve_vimeo(resolved_url)
         elif any(x in domain for x in ("vidstream", "rabbitstream", "megacloud", "as-cdn", "fireplayer")):
             result = await _resolve_vidstream_sidecar(resolved_url)
+        elif any(x in domain for x in ("xerver.xyz", "mirror.xerver", "vidsrc")):
+            result = await _resolve_vidsrc_xerver(resolved_url)
+        elif any(x in domain for x in ("emturbovid", "turboviplay", "turbosplayer")):
+            result = await _resolve_packed_player(resolved_url) or await _resolve_generic(resolved_url)
         elif any(x in domain for x in ("streamwish", "swish", "playerwish")):
             result = await _resolve_packed_player(resolved_url)
         elif any(x in domain for x in ("filemoon", "kerapoxy")):
@@ -81,10 +85,15 @@ async def get_m3u8_qualities(m3u8_url: str) -> list[Quality]:
         headers = {}
         if "megacloud" in domain or "rabbit" in domain or "dokicloud" in domain:
             headers["Referer"] = "https://megacloud.tv/"
-        elif "vmeas" in domain or "vidmoly" in domain:
+        elif "vmeas" in domain or "vidmoly" in domain or "vmbox" in domain:
             headers["Referer"] = "https://vidmoly.to/"
+        elif "turboviplay" in domain or "turbosplayer" in domain or "emturbovid" in domain:
+            headers["Referer"] = "https://emturbovid.com/"
+        elif "as-cdn" in domain or "fireplayer" in domain:
+            headers["Referer"] = f"https://{domain}/"
         elif domain:
             headers["Referer"] = f"https://{domain}/"
+        headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
             
         content = await http_client.get(m3u8_url, headers=headers, ttl=60)
         # Log full m3u8 for debugging audio tracks
@@ -468,3 +477,52 @@ async def _resolve_fireplayer(url: str) -> dict | None:
     except Exception as e:
         log.warning("FirePlayer extraction failed for %s: %s", url, e)
         return None
+
+
+async def _resolve_vidsrc_xerver(url: str) -> dict | None:
+    """
+    Extract stream from VidSrc (mirror.xerver.xyz / xerver.xyz).
+    Calls fetch=1 endpoint to obtain direct MP4 stream or mirrors.
+    """
+    from urllib.parse import urlparse, parse_qs, quote
+    import json
+
+    parsed = urlparse(url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    qs = parse_qs(parsed.query)
+    encrypted_url = qs.get("url", [""])[0]
+
+    if not encrypted_url:
+        html = await http_client.get(url, headers={"Referer": "https://animedekho.app/"})
+        m = re.search(r'ENCRYPTED_URL\s*=\s*["\']([^"\']+)["\']', html)
+        if m:
+            encrypted_url = m.group(1)
+
+    if not encrypted_url:
+        return None
+
+    fetch_url = f"{base_url}{parsed.path}?url={quote(encrypted_url)}&fetch=1"
+    headers = {
+        "Referer": url,
+        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    }
+    try:
+        resp_text = await http_client.get_no_cache(fetch_url, headers=headers)
+        if not resp_text:
+            return None
+        data = json.loads(resp_text)
+        results = data.get("results", {})
+
+        # Priority: instant_dl -> cloud_r2 -> direct_mgt
+        for key in ("instant_dl", "cloud_r2", "direct_mgt"):
+            src = results.get(key)
+            if src and isinstance(src, dict) and src.get("url"):
+                stream_url = src["url"]
+                vtype = "m3u8" if ".m3u8" in stream_url else "mp4"
+                log.info("VidSrc resolved: %s (type: %s, source: %s)", stream_url[:80], vtype, key)
+                return {"url": stream_url, "type": vtype, "quality": "auto"}
+    except Exception as e:
+        log.warning("VidSrc xerver extraction failed for %s: %s", url, e)
+
+    return None

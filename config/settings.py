@@ -31,8 +31,10 @@ class SiteConfig:
         7: "Omega",
         8: "Vidmoly",
     })
-    # Server priority order: VidStream first, HydraX fallback, Vidmoly last resort
-    preferred_servers: list = field(default_factory=lambda: ["VidStream", "HydraX", "Vidmoly"])
+    # Server priority order: VidStream first, then Omega, VidSrc, Vidmoly, etc.
+    preferred_servers: list = field(default_factory=lambda: [
+        "VidStream", "Omega", "VidSrc", "Vidmoly", "StreamWish", "FileMoon", "VidCloud", "Strmup", "HydraX"
+    ])
     # Default quality buttons always shown to user
     default_qualities: list = field(default_factory=lambda: ["480p", "720p", "1080p"])
 
