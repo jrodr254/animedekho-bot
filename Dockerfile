@@ -7,7 +7,7 @@ RUN apt-get update && \
     curl \
     ca-certificates \
     python3-pip \
-    bsdutils \
+    libicu-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install N_m3u8DL-RE binary (primary download engine)
@@ -36,8 +36,11 @@ COPY . .
 # Create data directory
 RUN mkdir -p /app/data
 
-# Prevent N_m3u8DL-RE Spectre.Console crash in headless containers
+# Prevent N_m3u8DL-RE .NET runtime and Spectre.Console crash in headless containers
 ENV TERM=xterm
-ENV DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION=0
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+ENV DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION=1
+ENV COMPlus_EnableDiagnostics=0
+ENV DOTNET_EnableDiagnostics=0
 
 CMD ["python", "main.py"]

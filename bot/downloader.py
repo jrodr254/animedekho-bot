@@ -304,7 +304,10 @@ async def n_m3u8dl_re_download(
 
         env = os.environ.copy()
         env["TERM"] = "xterm"
-        env["DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION"] = "0"
+        env["DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"] = "1"
+        env["DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION"] = "1"
+        env["COMPlus_EnableDiagnostics"] = "0"
+        env["DOTNET_EnableDiagnostics"] = "0"
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
