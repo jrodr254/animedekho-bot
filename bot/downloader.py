@@ -297,7 +297,7 @@ async def n_m3u8dl_re_download(
         ]
 
         if select_res and height:
-            cmd.extend(["--select-video", f"res={height}*"])
+            cmd.extend(["--select-video", f'res=".*{height}.*":for=best'])
         else:
             cmd.extend(["--auto-select"])
 
@@ -443,7 +443,7 @@ async def ffmpeg_download(
     cmd = ["ffmpeg", "-y"]
     headers = f"Referer: {origin}/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n"
     cmd.extend(["-headers", headers])
-    cmd.extend(["-i", stream_url, "-c", "copy", "-bsf:a", "aac_adtstoasc", output_path])
+    cmd.extend(["-i", stream_url, "-map", "0", "-c", "copy", "-bsf:a", "aac_adtstoasc", output_path])
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
