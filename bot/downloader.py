@@ -289,6 +289,7 @@ async def n_m3u8dl_re_download(
             "--download-retry-count", "5",
             "--binary-merge",
             "--no-ansi-color",
+            "--no-log",
             "-M", "format=mp4",
             "--select-audio", "all",
             "--select-subtitle", "all",
@@ -301,22 +302,16 @@ async def n_m3u8dl_re_download(
         else:
             cmd.extend(["--auto-select"])
 
-        import shlex
-        shell_cmd = " ".join(shlex.quote(c) for c in cmd)
         env = os.environ.copy()
         env["TERM"] = "xterm"
         env["DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION"] = "0"
 
-        use_script = shutil.which("script") is not None
-        if use_script:
-            proc = await asyncio.create_subprocess_exec(
-                "script", "-q", "/dev/null", "-c", shell_cmd,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, env=env,
-            )
-        else:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, env=env,
-            )
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
 
         last_edit = [0.0]
         start_time = time.time()
@@ -375,8 +370,9 @@ async def n_m3u8dl_re_download(
                     pass
 
         monitor_task = asyncio.create_task(_monitor())
+        stdout_data, stderr_data = b"", b""
         try:
-            await asyncio.wait_for(proc.wait(), timeout=1800)
+            stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=1800)
         except asyncio.TimeoutError:
             proc.kill()
             log.error("N_m3u8DL-RE timed out")
@@ -390,6 +386,10 @@ async def n_m3u8dl_re_download(
 
         if _stall_detected.is_set():
             return False
+
+        if proc.returncode != 0:
+            err_msg = stderr_data.decode("utf-8", errors="ignore").strip() or stdout_data.decode("utf-8", errors="ignore").strip()
+            log.warning("N_m3u8DL-RE exit code %d: %s", proc.returncode, err_msg[-500:])
 
         # Look for produced files
         if not os.path.exists(output_path):
